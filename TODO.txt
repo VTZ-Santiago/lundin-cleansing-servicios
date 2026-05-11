@@ -1,0 +1,18 @@
+# Pendientes
+
+## Deduplicación a nivel contrato (posterior a todas las reglas)
+El pipeline opera sobre filas (posiciones SAP). La reducción a contratos únicos, reteniendo
+la fecha de vencimiento más reciente, queda pendiente como etapa final del flujo.
+
+Criterio de conflicto a aplicar:
+  "migra" tiene prioridad sobre "no migra". Si un contrato tiene al menos una posición
+  que migra (exclusion_reason == ""), el contrato completo debe ir a migra y desaparecer
+  de C_NO_MIGRA.
+
+## Prioridad entre EXCLUDE (G1/R01) y RESCUE (G2/R02)
+Actualmente ambas reglas tienen priority: 1. En la implementación vigente G2 SIEMPRE revoca
+la exclusión de G1 cuando pending_planned_qty > 0, sin importar el contexto.
+
+Revisar si se requiere un modelo de prioridades más formal que permita configurar por regla
+si un RESCUE puede o no puede revocar un EXCLUDE específico (ej. R02 puede revocar R01 pero
+no una futura regla R05 de mayor severidad).

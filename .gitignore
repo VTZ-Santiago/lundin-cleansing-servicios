@@ -1,0 +1,9 @@
+tmp/
+logs/
+.vscode/
+.claude/
+venv/
+__pycache__/
+*.pyc
+inputs/*
+outputs/*

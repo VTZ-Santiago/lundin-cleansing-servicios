@@ -1,0 +1,61 @@
+groups:
+  G1_EXCLUSIONS:
+    name: "Grupo 1 — Exclusiones por vencimiento"
+    control_point_out: C2_NO_MIGRA
+    rules:
+      - id: R01
+        name: "Contrato vencido en 2025 o antes"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: ERROR
+        action: EXCLUDE
+        config:
+          cutoff_date: "2025-12-31"
+          # Filas con validity_end NaT se conservan (vencimiento desconocido = activo)
+
+  G2_RESCUE:
+    name: "Grupo 2 — Rescate por saldo pendiente"
+    control_point_out: C3
+    rules:
+      - id: R02
+        name: "Contrato con saldo pendiente positivo"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: WARNING
+        action: RESCUE
+        config:
+          column: "pending_planned_qty"
+          # Filas con pending_planned_qty > 0 rescatan la exclusión de G1
+
+  G3_MARKING:
+    name: "Grupo 3 — Clasificación y marcado"
+    control_point_out: C3
+    rules:
+      - id: R03
+        name: "Clasificación por tipo de posición"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+      - id: R04
+        name: "Clasificación por indicador de borrado"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+
+diagram:
+  title: "Lundin — Pipeline Contratos MLCC"
+  preamble:
+    - id: start
+      label: "DATOS\nRECIBIDOS"
+      shape: oval
+    - id: ingestion
+      label: "INGESTA\nPROFILING\nNORMALIZACIÓN"
+      shape: box
+    - id: C1
+      label: "CONTRATOS NORMALIZADOS"
+      shape: label
+      control_point: C1
+  group_output_labels:
+    G1_EXCLUSIONS: "CONTRATOS VIGENTES"

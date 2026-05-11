@@ -1,0 +1,81 @@
+import unicodedata
+
+# Maps raw Spanish column headers to canonical names.
+# Includes both NFC-normalized and plain ASCII fallbacks for robustness.
+MLCC_RAW_TO_CANONICAL: dict[str, str] = {
+    "Posición":                                  "position",
+    "Posicion":                                  "position",
+    "Documento Compras":                         "purchase_document",
+    "Documento compras":                         "purchase_document",   # 2025-2026 uses lowercase 'c'
+    "Material":                                  "material",
+    "Cl.documento compras":                      "purchase_doc_class",
+    "Tipo doc.compras":                          "purchase_doc_type",
+    "Grupo de compras":                          "purchase_group",
+    "Historial pedido/Docu.orden entrega":       "order_history_ref",
+    "Fecha documento":                           "document_date",
+    "Proveedor/Centro suministrador":            "vendor",
+    "Texto breve":                               "short_text",
+    "In.período validez":                        "validity_start",
+    "In.periodo validez":                        "validity_start",
+    "Fin período validez":                       "validity_end",
+    "Fin periodo validez":                       "validity_end",
+    "Grupo de artículos":                        "article_group",
+    "Grupo de articulos":                        "article_group",
+    "Indicador de borrado":                      "deletion_flag",
+    "Tipo de posición":                          "position_type",
+    "Tipo de posicion":                          "position_type",
+    "Tipo de imputación":                        "account_assignment_type",
+    "Tipo de imputacion":                        "account_assignment_type",
+    "Centro":                                    "plant_code",
+    "Almacén":                                   "warehouse_code",
+    "Almacen":                                   "warehouse_code",
+    "Cantidad de pedido":                        "order_quantity",
+    "Unidad medida pedido":                      "order_uom",
+    "Cantidad en UMA":                           "quantity_uma",
+    "Unidad de medida de almacén":               "warehouse_uom",
+    "Unidad de medida de almacen":               "warehouse_uom",
+    "Precio neto":                               "net_price",
+    "Moneda":                                    "currency",
+    "Cantidad base":                             "base_quantity",
+    "Val.prev.(cab.)":                           "estimated_value",
+    "Cantidad prevista":                         "planned_quantity",
+    "Ctd.prev.pendiente":                        "pending_planned_qty",
+    "Cantidad de posiciones":                    "position_count",
+}
+
+MLCC_DTYPE_COERCIONS: dict[str, str] = {
+    "position":                  "str",
+    "purchase_document":         "str",
+    "material":                  "str",
+    "purchase_doc_class":        "str",
+    "purchase_doc_type":         "str",
+    "purchase_group":            "str",
+    "order_history_ref":         "str",
+    "document_date":             "date",
+    "vendor":                    "str",
+    "short_text":                "str",
+    "validity_start":            "date",
+    "validity_end":              "date",
+    "article_group":             "str",
+    "deletion_flag":             "str",
+    "position_type":             "str",
+    "account_assignment_type":   "str",
+    "plant_code":                "str",
+    "warehouse_code":            "str",
+    "order_quantity":            "float",
+    "order_uom":                 "str",
+    "quantity_uma":              "float",
+    "warehouse_uom":             "str",
+    "net_price":                 "float",
+    "currency":                  "str",
+    "base_quantity":             "float",
+    "estimated_value":           "float",
+    "planned_quantity":          "float",
+    "pending_planned_qty":       "float",
+    "position_count":            "float",
+}
+
+
+def normalize_header(s: str) -> str:
+    """Strip whitespace and apply NFC Unicode normalization."""
+    return unicodedata.normalize("NFC", s.strip())
