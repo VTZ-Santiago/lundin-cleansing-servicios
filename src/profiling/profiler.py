@@ -49,6 +49,10 @@ class ProfilingResult:
     vendor_top10: list[tuple[str, int]] = field(default_factory=list)
     plant_distribution: dict[str, int] = field(default_factory=dict)
     source_file_counts: dict[str, int] = field(default_factory=dict)
+    purchase_group_distribution: dict[str, int] = field(default_factory=dict)
+    purchase_document_count_by_group: dict[str, int] = field(default_factory=dict)
+    estimated_value_total: float = 0.0
+    estimated_value_by_group: dict[str, float] = field(default_factory=dict)
 
 
 class DataProfiler:
@@ -129,6 +133,46 @@ class DataProfiler:
                 for k, v in df["_source_file"].value_counts().items()
             }
 
+        purchase_group_distribution: dict[str, int] = {}
+        purchase_document_count_by_group: dict[str, int] = {}
+        estimated_value_total = 0.0
+        estimated_value_by_group: dict[str, float] = {}
+        if "purchase_group" in df.columns:
+            purchase_group = df["purchase_group"].fillna("SIN_GRUPO").astype(str).str.strip()
+            purchase_group = purchase_group.where(purchase_group != "", other="SIN_GRUPO")
+            purchase_group_distribution = {
+                str(k): int(v)
+                for k, v in purchase_group.value_counts().items()
+            }
+
+            if "purchase_document" in df.columns:
+                purchase_document_count_by_group = {
+                    str(k): int(v)
+                    for k, v in (
+                        df.assign(_purchase_group=purchase_group)
+                        .groupby("_purchase_group")["purchase_document"]
+                        .nunique()
+                        .items()
+                    )
+                }
+
+            if "estimated_value" in df.columns:
+                amount = pd.to_numeric(df["estimated_value"], errors="coerce")
+                estimated_value_total = round(float(amount.sum(skipna=True)), 2)
+                estimated_value_by_group = {
+                    str(k): round(float(v), 2)
+                    for k, v in (
+                        df.assign(_purchase_group=purchase_group, _estimated_value=amount)
+                        .groupby("_purchase_group")["_estimated_value"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .items()
+                    )
+                }
+        elif "estimated_value" in df.columns:
+            amount = pd.to_numeric(df["estimated_value"], errors="coerce")
+            estimated_value_total = round(float(amount.sum(skipna=True)), 2)
+
         result = ProfilingResult(
             operation=operation,
             profiled_at=started,
@@ -139,6 +183,10 @@ class DataProfiler:
             vendor_top10=vendor_top10,
             plant_distribution=plant_dist,
             source_file_counts=source_counts,
+            purchase_group_distribution=purchase_group_distribution,
+            purchase_document_count_by_group=purchase_document_count_by_group,
+            estimated_value_total=estimated_value_total,
+            estimated_value_by_group=estimated_value_by_group,
         )
 
         critical_below_95 = sum(

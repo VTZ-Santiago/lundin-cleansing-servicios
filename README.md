@@ -15,12 +15,16 @@ INGESTA + NORMALIZACIÓN + PROFILING
         ↓
 [C1] CONTRATOS NORMALIZADOS
         ↓
-G1 — Exclusiones (R01: vencidos ≤ 2025-12-31)
+G1 — Primer filtro (R01: vencimiento, R02: tipo contrato/posición)
+        ↓
+G2 — Migración segura (R03: vencidos con saldo pendiente positivo)
+        ↓
+G3 — Clasificación y marcado (R04/R05 + marcas técnicas)
         ↓                        ↓
-[C2] CONTRATOS VIGENTES   [C2_NO_MIGRA] EXCLUIDOS
+[C3] CONTRATOS MIGRAN     [C2_NO_MIGRA] CONTRATOS NO MIGRAN
 ```
 
-**Invariante de reconciliación:** `C1 = C2 + C2_NO_MIGRA`
+**Invariante de reconciliación:** `C1 = C3 + C2_NO_MIGRA`
 
 ---
 
@@ -38,9 +42,12 @@ lundin-cleansing-servicios/
 │   ├── ingestion/assembler.py      # Carga y normalización de archivos Excel
 │   ├── rules/rules.yaml            # Config YAML de reglas (fuente de verdad)
 │   ├── rules/engine.py             # Motor de reglas (carga dinámica)
-│   ├── rules/group1/r01.py         # R01: contratos vencidos
+│   ├── rules/group1/               # G1: exclusiones por vencimiento/tipo
+│   ├── rules/group2/               # G2: rescate / migración segura
+│   ├── rules/group3/               # G3: clasificación y marcado
 │   ├── profiling/profiler.py       # Estadísticas por columna
 │   ├── output/control_point.py     # Exportación de puntos de control (Excel)
+│   ├── output/stats_report.py      # Reporte estadístico independiente
 │   ├── diagram/flowchart.py        # Generación de diagrama SVG
 │   └── lineage/                    # Trazabilidad de columnas
 ├── inputs/MLCC/                    # Archivos Excel de entrada (gitignored)
@@ -87,10 +94,13 @@ venv\Scripts\python.exe generate_diagram.py --format png
 | Archivo | Descripción |
 |---|---|
 | `C1_MLCC.xlsx` | Post-ingesta: todos los contratos normalizados |
-| `C2_MLCC.xlsx` | Post-G1: contratos vigentes (migran) |
-| `C2_NO_MIGRA_MLCC.xlsx` | Post-G1: contratos excluidos (vencidos ≤ 2025) |
+| `C2_NO_MIGRA_MLCC.xlsx` | Post-G1/G2: contratos excluidos por primer filtro y no rescatados |
+| `C3_MLCC.xlsx` | Post-G1/G2/G3: contratos que migran, con rescates y marcas aplicadas |
+| `reporte_estadistico_MLCC.xlsx` | Resumen estadístico C1 con vigencia, tipo, monto y grupo de compras |
 
 Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Stages**, **Profiling**.
+
+Los resúmenes de control incluyen fecha de vencimiento, tipo de contrato/posición, monto en USD y grupo de compras.
 
 ---
 
@@ -98,10 +108,17 @@ Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Sta
 
 | ID | Nombre | Grupo | Acción |
 |---|---|---|---|
-| R01 | Contrato vencido en 2025 o antes | G1_EXCLUSIONS | EXCLUDE |
+| R01 | Fecha de vencimiento en 2025 o antes | G1_EXCLUSIONS | EXCLUDE |
+| R02 | Tipo de contrato/posición distinto de D | G1_EXCLUSIONS | EXCLUDE |
+| R03 | Valores pendientes > 0 en contratos vencidos | G2_RESCUE | RESCUE |
+| R04 | Valores pendientes < 0 en contratos no vencidos | G3_MARKING | MARK |
+| R05 | Contratos que vencen en 2026 | G3_MARKING | MARK |
+| R06 | Monto del contrato | reporting.profiling_summary | Resumen |
+| M01 | Clasificación por tipo de posición | G3_MARKING | MARK |
+| M02 | Clasificación por indicador de borrado | G3_MARKING | MARK |
 
 Configuración en `src/rules/rules.yaml`. Para agregar una nueva regla:
-1. Crear `src/rules/group1/rNN.py` con una función `apply(df, operation, config) -> RuleResult`
+1. Crear `src/rules/groupN/rNN.py` con una función `apply(df, operation, config) -> RuleResult`
 2. Añadir la entrada en `rules.yaml` con `enabled`, `priority`, `action` y `config`
 
 ---

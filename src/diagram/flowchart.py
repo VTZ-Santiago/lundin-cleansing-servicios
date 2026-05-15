@@ -1,3 +1,5 @@
+import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -9,6 +11,23 @@ _INGESTION_BLUE = "#DBEAFE"
 _GROUP_YELLOW = "#FEF3C7"
 _START_GRAY = "#E5E7EB"
 _CP_LABEL_BG = "#FFF7ED"
+
+
+def _add_graphviz_to_path() -> None:
+    if sys.platform != "win32":
+        return
+
+    current = os.environ.get("PATH", "")
+    for graphviz_dir in (
+        r"C:\Program Files\Graphviz\bin",
+        r"C:\Program Files (x86)\Graphviz\bin",
+        r"C:\Graphviz\bin",
+        r"C:\ProgramData\chocolatey\bin",
+    ):
+        dot_exe = os.path.join(graphviz_dir, "dot.exe")
+        if os.path.isfile(dot_exe) and graphviz_dir not in current:
+            os.environ["PATH"] = graphviz_dir + os.pathsep + current
+            return
 
 
 def _read_cp_rows(control_points_dir: Path | None, cp_id: str, operation: str) -> str:
@@ -51,6 +70,8 @@ def generate_flowchart(
         import graphviz
     except ImportError:
         raise ImportError("Install graphviz: pip install graphviz")
+
+    _add_graphviz_to_path()
 
     with open(yaml_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
@@ -107,6 +128,7 @@ def generate_flowchart(
         g.edge(a, b, color=_MAIN_DARK)
 
     last_preamble = preamble_ids[-1] if preamble_ids else "start"
+    final_outputs = diagram_cfg.get("final_outputs", [])
 
     # --- Rule groups ---
     for group_id, group_cfg in config.get("groups", {}).items():
@@ -122,6 +144,10 @@ def generate_flowchart(
         g.node(group_id, group_label, shape="diamond", style="filled",
                fillcolor=_GROUP_YELLOW, color=_MAIN_DARK)
         g.edge(last_preamble, group_id, color=_MAIN_DARK)
+
+        if final_outputs:
+            last_preamble = group_id
+            continue
 
         # Survivors output (C2, etc.)
         cp_out = group_cfg.get("control_point_out", "C2")
@@ -149,16 +175,40 @@ def generate_flowchart(
 
         last_preamble = cp_out
 
+    if final_outputs:
+        for output in final_outputs:
+            output_id = output["id"]
+            cp_id = output.get("control_point", output_id)
+            output_label = output.get("label", output_id)
+            rows_str = _read_cp_rows(control_points_dir, cp_id, op)
+            if rows_str:
+                output_label = f"{output_label}\n{rows_str}"
+
+            if output.get("kind") == "exclude":
+                g.node(output_id, output_label, shape="box", style="filled",
+                       fillcolor="#FEE2E2", color=_EXCL_RED, penwidth="2",
+                       fontcolor=_EXCL_RED)
+                g.edge(last_preamble, output_id,
+                       label=output.get("edge_label", "No migra"),
+                       color=_EXCL_RED, fontcolor=_EXCL_RED)
+            else:
+                g.node(output_id, output_label, shape="box", style="filled",
+                       fillcolor=_CP_LABEL_BG, color=_CP_ORANGE, penwidth="2")
+                g.edge(last_preamble, output_id,
+                       label=output.get("edge_label", "Migra"),
+                       color=_MAIN_DARK)
+
     # Render
     out_stem = str(output_path.with_suffix(""))
+    dot_path = output_path.with_suffix(".dot")
+    dot_path.write_text(g.source, encoding="utf-8")
+
     try:
         rendered = g.render(filename=out_stem, cleanup=True)
         return Path(rendered)
     except Exception as exc:
-        # Fallback: save .dot source
-        dot_path = output_path.with_suffix(".dot")
-        dot_path.write_text(g.source, encoding="utf-8")
         print(f"\n[WARN] Graphviz binary not found ({exc}).")
+        print("       Intenté resolver rutas estándar de Graphviz en Windows.")
         print(f"       Fuente DOT guardada en: {dot_path}")
         print(f"       Para renderizar: dot -T{fmt} \"{dot_path}\" -o \"{output_path}\"")
         return dot_path

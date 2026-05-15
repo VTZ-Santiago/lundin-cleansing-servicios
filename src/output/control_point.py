@@ -97,6 +97,27 @@ def _build_analysis_rows(df: pd.DataFrame) -> tuple[list[dict], list[int]]:
             "nro_contratos": int(subset["purchase_document"].nunique()) if "purchase_document" in subset.columns else 0,
         }
 
+        if "estimated_value" in subset.columns:
+            amount = pd.to_numeric(subset["estimated_value"], errors="coerce")
+            row["monto_total_usd"] = round(float(amount.sum(skipna=True)), 2)
+            row["monto_promedio_usd"] = round(float(amount.mean(skipna=True)), 2) if amount.notna().any() else 0.0
+        else:
+            row["monto_total_usd"] = 0.0
+            row["monto_promedio_usd"] = 0.0
+
+        if "purchase_group" in subset.columns:
+            purchase_group = subset["purchase_group"].fillna("SIN_GRUPO").astype(str).str.strip()
+            purchase_group = purchase_group.where(purchase_group != "", other="SIN_GRUPO")
+            group_counts = purchase_group.value_counts()
+            row["grupos_compra"] = int(purchase_group.nunique())
+            row["grupo_compra_top"] = (
+                f"{group_counts.index[0]} ({int(group_counts.iloc[0])})"
+                if not group_counts.empty else ""
+            )
+        else:
+            row["grupos_compra"] = 0
+            row["grupo_compra_top"] = ""
+
         # position_type by contract: dominant (most frequent) type per purchase_document
         if "position_type" in subset.columns and "purchase_document" in subset.columns:
             pt = subset[["purchase_document", "position_type"]].copy()
@@ -188,6 +209,7 @@ def _write_info(wb: Workbook, cp_id: str, description: str, operation: str,
 
         headers = (
             ["Periodo", "Nro de Linea", "Nro de Cttos",
+             "Monto en USD", "Monto prom. USD", "Grupos de Compras", "Grupo de Compras top",
              "C", "D", "V", "Vacío",
              "L", "S", "Sin Flag"]
             + [str(y) for y in years]
@@ -199,6 +221,10 @@ def _write_info(wb: Workbook, cp_id: str, description: str, operation: str,
                 ar.get("periodo", ""),
                 ar.get("nro_lineas", 0),
                 ar.get("nro_contratos", 0),
+                ar.get("monto_total_usd", 0.0),
+                ar.get("monto_promedio_usd", 0.0),
+                ar.get("grupos_compra", 0),
+                ar.get("grupo_compra_top", ""),
                 ar.get("pos_C", 0),
                 ar.get("pos_D", 0),
                 ar.get("pos_V", 0),
@@ -327,23 +353,51 @@ def _write_profiling(wb: Workbook, profiling: ProfilingResult) -> None:
             ),
         )
 
+    offset = len(profiles_sorted) + 4
+
     # Validity-end by year as a summary block below the main table
     if profiling.validity_end_by_year:
-        offset = len(profiles_sorted) + 4
         ws.cell(row=offset, column=1, value="Distribución validity_end por año").font = Font(bold=True)
         ws.cell(row=offset, column=2, value="Contratos")
         for i, (yr, cnt) in enumerate(sorted(profiling.validity_end_by_year.items()), 1):
             ws.cell(row=offset + i, column=1, value=yr)
             ws.cell(row=offset + i, column=2, value=cnt)
+        offset += len(profiling.validity_end_by_year) + 3
 
     # Source file counts
     if profiling.source_file_counts:
-        offset2 = len(profiles_sorted) + 4 + len(profiling.validity_end_by_year) + 3
-        ws.cell(row=offset2, column=1, value="Filas por archivo de origen").font = Font(bold=True)
-        ws.cell(row=offset2, column=2, value="Filas")
+        ws.cell(row=offset, column=1, value="Filas por archivo de origen").font = Font(bold=True)
+        ws.cell(row=offset, column=2, value="Filas")
         for i, (fname, cnt) in enumerate(profiling.source_file_counts.items(), 1):
-            ws.cell(row=offset2 + i, column=1, value=fname)
-            ws.cell(row=offset2 + i, column=2, value=cnt)
+            ws.cell(row=offset + i, column=1, value=fname)
+            ws.cell(row=offset + i, column=2, value=cnt)
+        offset += len(profiling.source_file_counts) + 3
+
+    has_estimated_value = any(p.canonical_name == "estimated_value" for p in profiles_sorted)
+    if has_estimated_value:
+        ws.cell(row=offset, column=1, value="Resumen monto del contrato").font = Font(bold=True)
+        ws.cell(row=offset + 1, column=1, value="Monto total USD")
+        amount_cell = ws.cell(row=offset + 1, column=2, value=profiling.estimated_value_total)
+        amount_cell.number_format = '#,##0.00'
+        offset += 4
+
+    if profiling.purchase_group_distribution:
+        ws.cell(row=offset, column=1, value="Resumen por grupo de compras").font = Font(bold=True)
+        _write_header_row(ws, ["Grupo de Compras", "Líneas", "Contratos", "Monto en USD"], row=offset + 1)
+        groups = sorted(
+            profiling.purchase_group_distribution,
+            key=lambda group: (
+                profiling.estimated_value_by_group.get(group, 0.0),
+                profiling.purchase_group_distribution.get(group, 0),
+            ),
+            reverse=True,
+        )
+        for i, group in enumerate(groups, offset + 2):
+            ws.cell(row=i, column=1, value=group)
+            ws.cell(row=i, column=2, value=profiling.purchase_group_distribution.get(group, 0))
+            ws.cell(row=i, column=3, value=profiling.purchase_document_count_by_group.get(group, 0))
+            amount_cell = ws.cell(row=i, column=4, value=profiling.estimated_value_by_group.get(group, 0.0))
+            amount_cell.number_format = '#,##0.00'
 
     ws.freeze_panes = "A2"
     _autofit(ws)

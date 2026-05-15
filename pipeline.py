@@ -4,6 +4,7 @@ import logging
 from src.config.settings import Settings
 from src.ingestion.assembler import ContractAssembler
 from src.output.control_point import export_control_point
+from src.output.stats_report import generate_stats_report
 from src.profiling.profiler import DataProfiler
 from src.rules.engine import RuleEngine
 from src.utils.logger import setup_logger
@@ -71,7 +72,7 @@ def run(operation: str) -> None:
     log.info("  C1 exportado: %s  (%d filas)", cp1.name, len(master))
 
     # --- 4. G1 exclusions ---
-    log.info("[4/6] Aplicando reglas G1 (exclusiones por vencimiento)...")
+    log.info("[4/6] Aplicando reglas G1 (primer filtro por vencimiento y tipo)...")
     engine = RuleEngine(settings)
     df_g1, g1_issues, g1_manifest = engine.apply_group("G1_EXCLUSIONS", master, operation)
     manifests.append(g1_manifest)
@@ -79,10 +80,10 @@ def run(operation: str) -> None:
     g1_excluded = int((df_g1["exclusion_reason"] != "").sum())
     for issue in g1_issues:
         log.info("  Regla %s (%s): %d filas excluidas", issue.code, issue.message, issue.row_count)
-    log.info("  Excluidos post-G1: %d  |  Sobrevivientes: %d", g1_excluded, len(df_g1) - g1_excluded)
+    log.info("  Excluidos post-G1: %d  |  Candidatos vigentes/tipo D: %d", g1_excluded, len(df_g1) - g1_excluded)
 
     # --- 5. G2 rescue ---
-    log.info("[5/6] Aplicando reglas G2 (rescate por saldo pendiente)...")
+    log.info("[5/6] Aplicando reglas G2 (migracion segura por saldo pendiente)...")
     df_g2, g2_issues, g2_manifest = engine.apply_group("G2_RESCUE", df_g1, operation)
     manifests.append(g2_manifest)
 
@@ -90,9 +91,9 @@ def run(operation: str) -> None:
     for issue in g2_issues:
         log.info("  Regla %s (%s): %d filas rescatadas", issue.code, issue.message, issue.row_count)
     if rescued_count > 0:
-        log.info("  Rescatados de G1 por saldo pendiente: %d", rescued_count)
+        log.info("  Rescatados por saldo pendiente positivo en vencidos: %d", rescued_count)
     else:
-        log.info("  Sin rescates por saldo pendiente  [OK]")
+        log.info("  Sin rescates por saldo pendiente positivo en vencidos  [OK]")
 
     # --- 6. G3 marking (solo sobre migrantes) ---
     log.info("[6/6] Aplicando reglas G3 (clasificacion y marcado)...")
@@ -106,6 +107,12 @@ def run(operation: str) -> None:
     if "mark_deletion_flag" in df_g3.columns:
         df_dist = df_g3["mark_deletion_flag"].value_counts().to_dict()
         log.info("  mark_deletion_flag: %s", "  ".join(f"{k}={v}" for k, v in sorted(df_dist.items())))
+    if "mark_pending_negative_active" in df_g3.columns:
+        neg_count = int((df_g3["mark_pending_negative_active"] != "").sum())
+        log.info("  mark_pending_negative_active: %d", neg_count)
+    if "mark_validity_2026" in df_g3.columns:
+        validity_2026_count = int((df_g3["mark_validity_2026"] != "").sum())
+        log.info("  mark_validity_2026: %d", validity_2026_count)
 
     # --- Final split ---
     df_no_migra = df_g2[df_g2["exclusion_reason"] != ""].copy()
@@ -115,18 +122,19 @@ def run(operation: str) -> None:
 
     cp2_nm = export_control_point(
         cp_id="C2_NO_MIGRA",
-        description="Post-G1/G2: contratos excluidos (vencidos y sin saldo pendiente).",
+        description="Post-G1/G2: contratos excluidos por primer filtro y no rescatados.",
         operation=operation,
         df=df_no_migra,
         lineage=lineage,
         profiling=profiling,
         manifests=list(manifests),
-        issues=g1_issues,
+        issues=g1_issues + g2_issues,
         output_dir=settings.control_points_dir,
+        include_analysis=True,
     )
     cp3 = export_control_point(
         cp_id="C3",
-        description="Post-G1/G2/G3: contratos vigentes clasificados (migran).",
+        description="Post-G1/G2/G3: contratos que migran, con rescates y marcas aplicadas.",
         operation=operation,
         df=df_migra,
         lineage=lineage,
@@ -159,6 +167,13 @@ def run(operation: str) -> None:
             f"Reconciliation failed: "
             f"C1={len(master)} != C3={len(df_migra)} + C2_NO_MIGRA={len(df_no_migra)}"
         )
+
+    # --- Reporte estadístico independiente (C1 — universo pre-reglas) ---
+    rpt = generate_stats_report(
+        master, operation, settings.outputs_dir,
+        dataset_label=f"Universo Completo — C1 (pre-reglas, {len(master):,} filas)",
+    )
+    log.info("  Reporte estadistico:      %s", rpt.name)
 
 
 def _parse_args() -> argparse.Namespace:
