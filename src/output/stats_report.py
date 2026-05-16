@@ -301,6 +301,7 @@ def generate_stats_report(
     operation: str,
     output_dir: Path,
     dataset_label: str = "Universo Completo — C1 (pre-reglas)",
+    entity_label: str = "Contratos",
 ) -> Path:
     if "validity_end" in df.columns:
         ve = pd.to_datetime(df["validity_end"], errors="coerce")
@@ -342,7 +343,7 @@ def generate_stats_report(
     # Fila 1 — Banner
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
     t = ws.cell(row=1, column=1,
-                value=(f"Estadísticas de Contratos — Operación {operation}   |   "
+              value=(f"Estadísticas de {entity_label} — Operación {operation}   |   "
                        f"{dataset_label}   |   "
                        f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}"))
     t.font = Font(bold=True, size=12, color="FFFFFF")

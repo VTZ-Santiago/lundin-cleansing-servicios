@@ -168,7 +168,8 @@ def _build_analysis_rows(df: pd.DataFrame) -> tuple[list[dict], list[int]]:
 def _write_info(wb: Workbook, cp_id: str, description: str, operation: str,
                 df: pd.DataFrame, issues: list[IssueRecord], manifests: list[StageManifest],
                 analysis_rows: list[dict] | None = None,
-                analysis_years: list[int] | None = None) -> None:
+                analysis_years: list[int] | None = None,
+                analysis_subject: str = "Contratos") -> None:
     ws = wb.active
     ws.title = "Info"
 
@@ -204,7 +205,7 @@ def _write_info(wb: Workbook, cp_id: str, description: str, operation: str,
         years = analysis_years or []
 
         title_cell = ws.cell(row=offset, column=1,
-                             value=f"Análisis de Datos de Contratos {operation}")
+                             value=f"Análisis de Datos de {analysis_subject} {operation}")
         title_cell.font = Font(bold=True, size=12)
 
         headers = (
@@ -416,6 +417,7 @@ def export_control_point(
     issues: list[IssueRecord],
     output_dir: Path,
     include_analysis: bool = False,
+    analysis_subject: str = "Contratos",
 ) -> Path:
     path = output_dir / f"{cp_id}_{operation}.xlsx"
     wb = Workbook()
@@ -424,7 +426,8 @@ def export_control_point(
         _build_analysis_rows(df) if include_analysis else (None, None)
     )
     _write_info(wb, cp_id, description, operation, df, issues, manifests,
-                analysis_rows=analysis_rows, analysis_years=analysis_years)
+                analysis_rows=analysis_rows, analysis_years=analysis_years,
+                analysis_subject=analysis_subject)
     _write_master(wb, df)
     _write_field_map(wb, lineage)
     _write_issues(wb, issues)

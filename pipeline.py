@@ -1,8 +1,9 @@
 import argparse
 import logging
 
+from src.config.domains import DOMAIN_CONFIGS, get_domain_config
 from src.config.settings import Settings
-from src.ingestion.assembler import ContractAssembler
+from src.ingestion.assembler import DomainAssembler
 from src.output.control_point import export_control_point
 from src.output.stats_report import generate_stats_report
 from src.profiling.profiler import DataProfiler
@@ -10,18 +11,19 @@ from src.rules.engine import RuleEngine
 from src.utils.logger import setup_logger
 
 
-def run(operation: str) -> None:
-    settings = Settings()
+def run(operation: str, domain: str = "contratos") -> None:
+    settings = Settings(domain=domain)
     settings.ensure_dirs()
+    domain_cfg = get_domain_config(settings.domain)
 
-    log = setup_logger(settings.project_root / "logs", operation)
+    log = setup_logger(settings.project_root / "logs", f"{domain_cfg.output_suffix}_{operation}")
     log.info("=" * 60)
-    log.info("Pipeline iniciado  |  operacion: %s", operation)
+    log.info("Pipeline iniciado  |  dominio: %s  |  operacion: %s", domain_cfg.cli_name, operation)
     log.info("=" * 60)
 
     # --- 1. Ingestion + schema normalisation ---
     log.info("[1/4] Ingesta y normalizacion de esquema...")
-    assembler = ContractAssembler(settings)
+    assembler = DomainAssembler(settings)
     master, lineage, manifests, stats = assembler.build(operation)
 
     log.info("  Archivos cargados (%d):", len(stats.files_loaded))
@@ -59,15 +61,16 @@ def run(operation: str) -> None:
     log.info("[3/4] Exportando C1...")
     cp1 = export_control_point(
         cp_id="C1",
-        description="Post-ingesta: datos normalizados y perfilados.",
+        description=f"Post-ingesta: {domain_cfg.display_name.lower()} normalizados y perfilados.",
         operation=operation,
         df=master,
         lineage=lineage,
         profiling=profiling,
         manifests=list(manifests),
         issues=[],
-        output_dir=settings.control_points_dir,
+        output_dir=settings.domain_control_points_dir,
         include_analysis=True,
+        analysis_subject=domain_cfg.display_name,
     )
     log.info("  C1 exportado: %s  (%d filas)", cp1.name, len(master))
 
@@ -113,6 +116,9 @@ def run(operation: str) -> None:
     if "mark_validity_2026" in df_g3.columns:
         validity_2026_count = int((df_g3["mark_validity_2026"] != "").sum())
         log.info("  mark_validity_2026: %d", validity_2026_count)
+    if "mark_direct_cost_center_service" in df_g3.columns:
+        direct_cost_center_count = int((df_g3["mark_direct_cost_center_service"] != "").sum())
+        log.info("  mark_direct_cost_center_service: %d", direct_cost_center_count)
 
     # --- Final split ---
     df_no_migra = df_g2[df_g2["exclusion_reason"] != ""].copy()
@@ -122,27 +128,29 @@ def run(operation: str) -> None:
 
     cp2_nm = export_control_point(
         cp_id="C2_NO_MIGRA",
-        description="Post-G1/G2: contratos excluidos por primer filtro y no rescatados.",
+        description=f"Post-G1/G2: {domain_cfg.display_name.lower()} excluidos por primer filtro y no rescatados.",
         operation=operation,
         df=df_no_migra,
         lineage=lineage,
         profiling=profiling,
         manifests=list(manifests),
         issues=g1_issues + g2_issues,
-        output_dir=settings.control_points_dir,
+        output_dir=settings.domain_control_points_dir,
         include_analysis=True,
+        analysis_subject=domain_cfg.display_name,
     )
     cp3 = export_control_point(
         cp_id="C3",
-        description="Post-G1/G2/G3: contratos que migran, con rescates y marcas aplicadas.",
+        description=f"Post-G1/G2/G3: {domain_cfg.display_name.lower()} que migran, con rescates y marcas aplicadas.",
         operation=operation,
         df=df_migra,
         lineage=lineage,
         profiling=profiling,
         manifests=list(manifests),
         issues=all_issues,
-        output_dir=settings.control_points_dir,
+        output_dir=settings.domain_control_points_dir,
         include_analysis=True,
+        analysis_subject=domain_cfg.display_name,
     )
 
     # --- Summary ---
@@ -170,17 +178,30 @@ def run(operation: str) -> None:
 
     # --- Reporte estadístico independiente (C1 — universo pre-reglas) ---
     rpt = generate_stats_report(
-        master, operation, settings.outputs_dir,
+        master, operation, settings.domain_outputs_dir,
         dataset_label=f"Universo Completo — C1 (pre-reglas, {len(master):,} filas)",
+        entity_label=domain_cfg.display_name,
     )
     log.info("  Reporte estadistico:      %s", rpt.name)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Lundin Contracts Cleansing Pipeline",
+        description="Lundin domain-aware cleansing pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Ejemplos:\n  python pipeline.py\n  python pipeline.py --operation MLCC",
+        epilog=(
+            "Ejemplos:\n"
+            "  python pipeline.py\n"
+            "  python pipeline.py --domain contratos --operation MLCC\n"
+            "  python pipeline.py --domain ordenes-compra --operation MLCC"
+        ),
+    )
+    domain_choices = sorted(config.cli_name for config in DOMAIN_CONFIGS.values())
+    parser.add_argument(
+        "--domain", "-d",
+        default="contratos",
+        choices=domain_choices,
+        help="Dominio a procesar (default: contratos)",
     )
     parser.add_argument(
         "--operation", "-o",
@@ -193,4 +214,4 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
-    run(args.operation)
+    run(args.operation, args.domain)

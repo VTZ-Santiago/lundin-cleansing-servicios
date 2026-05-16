@@ -1,10 +1,17 @@
 # lundin-cleansing-servicios
 
-Pipeline de limpieza y estandarización de datos de **contratos/servicios** para MLCC.
+Pipeline de limpieza y estandarización de datos de **contratos** y **órdenes de compra** para MLCC.
 
 Basado en la arquitectura de `lundin-cleansing-all-rules`, adaptado al dominio de contratos.
 
 ---
+
+## Dominios soportados
+
+- `contratos`: usa los archivos en [inputs/MLCC/contratos](inputs/MLCC/contratos) y conserva el flujo de reglas original de contratos.
+- `ordenes-compra`: usa los archivos en [inputs/MLCC/ordenes-compra](inputs/MLCC/ordenes-compra) y aplica reglas equivalentes para PO, incluyendo una marca adicional para cargos directos a centro de costo vía `Tipo de imputación`.
+
+Los paquetes Python asociados son [src/contratos](src/contratos) y [src/ordenes_compra](src/ordenes_compra). El selector operativo es `--domain contratos|ordenes-compra`.
 
 ## Flujo del pipeline
 
@@ -13,15 +20,15 @@ DATOS RECIBIDOS (4 archivos Excel MLCC)
         ↓
 INGESTA + NORMALIZACIÓN + PROFILING
         ↓
-[C1] CONTRATOS NORMALIZADOS
+[C1] DATOS NORMALIZADOS
         ↓
 G1 — Primer filtro (R01: vencimiento, R02: tipo contrato/posición)
         ↓
 G2 — Migración segura (R03: vencidos con saldo pendiente positivo)
         ↓
-G3 — Clasificación y marcado (R04/R05 + marcas técnicas)
+G3 — Clasificación y marcado (R04/R05 + marcas técnicas + regla PO de imputación)
         ↓                        ↓
-[C3] CONTRATOS MIGRAN     [C2_NO_MIGRA] CONTRATOS NO MIGRAN
+[C3] REGISTROS MIGRAN     [C2_NO_MIGRA] REGISTROS NO MIGRAN
 ```
 
 **Invariante de reconciliación:** `C1 = C3 + C2_NO_MIGRA`
@@ -40,11 +47,9 @@ lundin-cleansing-servicios/
 │   ├── schema/canonical.py         # Esquema canónico (29 columnas + 2 auxiliares)
 │   ├── schema/field_map_mlcc.py    # Mapeo de headers español → canónico
 │   ├── ingestion/assembler.py      # Carga y normalización de archivos Excel
-│   ├── rules/rules.yaml            # Config YAML de reglas (fuente de verdad)
-│   ├── rules/engine.py             # Motor de reglas (carga dinámica)
-│   ├── rules/group1/               # G1: exclusiones por vencimiento/tipo
-│   ├── rules/group2/               # G2: rescate / migración segura
-│   ├── rules/group3/               # G3: clasificación y marcado
+│   ├── contratos/                  # Dominio contratos: reglas y mapping MLCC
+│   ├── ordenes_compra/             # Dominio órdenes de compra: reglas y mapping MLCC
+│   ├── rules/engine.py             # Motor de reglas (carga dinámica por dominio)
 │   ├── profiling/profiler.py       # Estadísticas por columna
 │   ├── output/control_point.py     # Exportación de puntos de control (Excel)
 │   ├── output/stats_report.py      # Reporte estadístico independiente
@@ -74,52 +79,62 @@ winget install graphviz
 ## Uso
 
 ```powershell
-# Ejecutar pipeline completo
+# Ejecutar pipeline completo para contratos
 venv\Scripts\python.exe pipeline.py
 
-# Operación específica
-venv\Scripts\python.exe pipeline.py --operation MLCC
+# Contratos explícito
+venv\Scripts\python.exe pipeline.py --domain contratos --operation MLCC
 
-# Generar diagrama SVG
-venv\Scripts\python.exe generate_diagram.py
+# Órdenes de compra
+venv\Scripts\python.exe pipeline.py --domain ordenes-compra --operation MLCC
 
-# Generar diagrama PNG
-venv\Scripts\python.exe generate_diagram.py --format png
+# Generar diagrama SVG para contratos
+venv\Scripts\python.exe generate_diagram.py --domain contratos
+
+# Generar diagrama PNG para órdenes de compra
+venv\Scripts\python.exe generate_diagram.py --domain ordenes-compra --format png
+
+# Verificar compilación rápida
+venv\Scripts\python.exe -m compileall src pipeline.py generate_diagram.py
 ```
 
 ---
 
 ## Puntos de control (outputs)
 
-| Archivo | Descripción |
+| Ruta | Descripción |
 |---|---|
-| `C1_MLCC.xlsx` | Post-ingesta: todos los contratos normalizados |
-| `C2_NO_MIGRA_MLCC.xlsx` | Post-G1/G2: contratos excluidos por primer filtro y no rescatados |
-| `C3_MLCC.xlsx` | Post-G1/G2/G3: contratos que migran, con rescates y marcas aplicadas |
-| `reporte_estadistico_MLCC.xlsx` | Resumen estadístico C1 con vigencia, tipo, monto y grupo de compras |
+| `outputs/contratos/control_points/C1_MLCC.xlsx` | Post-ingesta contratos |
+| `outputs/contratos/control_points/C2_NO_MIGRA_MLCC.xlsx` | Contratos no migran |
+| `outputs/contratos/control_points/C3_MLCC.xlsx` | Contratos migran |
+| `outputs/contratos/reporte_estadistico_MLCC.xlsx` | Resumen estadístico contratos |
+| `outputs/ordenes_compra/control_points/C1_MLCC.xlsx` | Post-ingesta órdenes de compra |
+| `outputs/ordenes_compra/control_points/C2_NO_MIGRA_MLCC.xlsx` | Órdenes no migran |
+| `outputs/ordenes_compra/control_points/C3_MLCC.xlsx` | Órdenes migran |
+| `outputs/ordenes_compra/reporte_estadistico_MLCC.xlsx` | Resumen estadístico órdenes de compra |
 
-Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Stages**, **Profiling**.
+Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Stages**, **Profiling**. Los diagramas se generan por dominio en `outputs/<dominio>/diagrama_pipeline.*`.
 
-Los resúmenes de control incluyen fecha de vencimiento, tipo de contrato/posición, monto en USD y grupo de compras.
+Los resúmenes de control incluyen fecha de vencimiento, tipo de posición, monto cuando exista, grupo de compras y, para PO, el marcado de cargos directos a centro de costo.
 
 ---
 
 ## Reglas activas
 
-| ID | Nombre | Grupo | Acción |
+| ID | Nombre | Dominio | Grupo | Acción |
 |---|---|---|---|
-| R01 | Fecha de vencimiento en 2025 o antes | G1_EXCLUSIONS | EXCLUDE |
-| R02 | Tipo de contrato/posición distinto de D | G1_EXCLUSIONS | EXCLUDE |
-| R03 | Valores pendientes > 0 en contratos vencidos | G2_RESCUE | RESCUE |
-| R04 | Valores pendientes < 0 en contratos no vencidos | G3_MARKING | MARK |
-| R05 | Contratos que vencen en 2026 | G3_MARKING | MARK |
-| R06 | Monto del contrato | reporting.profiling_summary | Resumen |
-| M01 | Clasificación por tipo de posición | G3_MARKING | MARK |
-| M02 | Clasificación por indicador de borrado | G3_MARKING | MARK |
+| R01 | Fecha de vencimiento en 2025 o antes | contratos / ordenes-compra | G1_EXCLUSIONS | EXCLUDE |
+| R02 | Tipo de posición distinto de D | contratos / ordenes-compra | G1_EXCLUSIONS | EXCLUDE |
+| R03 | Valores pendientes > 0 en registros vencidos | contratos / ordenes-compra | G2_RESCUE | RESCUE |
+| R04 | Valores pendientes < 0 en registros no vencidos | contratos / ordenes-compra | G3_MARKING | MARK |
+| R05 | Registros que vencen en 2026 | contratos / ordenes-compra | G3_MARKING | MARK |
+| R06 | Servicios con cargo directo a centro de costo (`K`) | ordenes-compra | G3_MARKING | MARK |
+| M01 | Clasificación por tipo de posición | contratos / ordenes-compra | G3_MARKING | MARK |
+| M02 | Clasificación por indicador de borrado | contratos / ordenes-compra | G3_MARKING | MARK |
 
-Configuración en `src/rules/rules.yaml`. Para agregar una nueva regla:
-1. Crear `src/rules/groupN/rNN.py` con una función `apply(df, operation, config) -> RuleResult`
-2. Añadir la entrada en `rules.yaml` con `enabled`, `priority`, `action` y `config`
+Configuración por dominio en [src/contratos/rules/rules.yaml](src/contratos/rules/rules.yaml) y [src/ordenes_compra/rules/rules.yaml](src/ordenes_compra/rules/rules.yaml). Para agregar una nueva regla:
+1. Crear el módulo en el dominio correspondiente, por ejemplo `src/ordenes_compra/rules/group3/rNN.py`
+2. Añadir la entrada en el `rules.yaml` del dominio con `enabled`, `priority`, `action` y `config`
 
 ---
 

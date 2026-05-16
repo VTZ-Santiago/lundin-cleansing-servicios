@@ -9,10 +9,17 @@ from src.config.settings import Settings
 from src.lineage.records import IssueRecord, StageManifest
 from src.rules.base import RuleResult
 
-_GROUP_MODULE_PREFIX: dict[str, str] = {
-    "G1_EXCLUSIONS": "src.rules.group1",
-    "G2_RESCUE":     "src.rules.group2",
-    "G3_MARKING":    "src.rules.group3",
+_GROUP_MODULE_PREFIX_BY_DOMAIN: dict[str, dict[str, str]] = {
+    "contratos": {
+        "G1_EXCLUSIONS": "src.contratos.rules.group1",
+        "G2_RESCUE":     "src.contratos.rules.group2",
+        "G3_MARKING":    "src.contratos.rules.group3",
+    },
+    "ordenes_compra": {
+        "G1_EXCLUSIONS": "src.ordenes_compra.rules.group1",
+        "G2_RESCUE":     "src.ordenes_compra.rules.group2",
+        "G3_MARKING":    "src.ordenes_compra.rules.group3",
+    },
 }
 
 
@@ -45,7 +52,7 @@ class RuleEngine:
         all_issues: list[IssueRecord] = []
         rules_applied: list[str] = []
 
-        module_prefix = _GROUP_MODULE_PREFIX.get(group_id)
+        module_prefix = _GROUP_MODULE_PREFIX_BY_DOMAIN[self.settings.domain].get(group_id)
         if module_prefix is None:
             raise ValueError(f"No module prefix configured for group '{group_id}'")
 

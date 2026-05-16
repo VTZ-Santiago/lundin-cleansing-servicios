@@ -1,0 +1,115 @@
+groups:
+  G1_EXCLUSIONS:
+    name: "Grupo 1 — Primer filtro por vencimiento y tipo"
+    control_point_out: C2
+    rules:
+      - id: R01
+        name: "Fecha de vencimiento en 2025 o antes"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: ERROR
+        action: EXCLUDE
+        config:
+          cutoff_date: "2025-12-31"
+          # Filas con validity_end NaT se conservan (vencimiento desconocido = activo)
+      - id: R02
+        name: "Tipo de contrato/posición distinto de D"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: ERROR
+        action: EXCLUDE
+        config:
+          allowed_position_type: "D"
+
+  G2_RESCUE:
+    name: "Grupo 2 — Migración segura por saldo pendiente"
+    control_point_out: C3
+    rules:
+      - id: R03
+        name: "Valores pendientes > 0 en contratos vencidos"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: WARNING
+        action: RESCUE
+        config:
+          column: "pending_planned_qty"
+          cutoff_date: "2025-12-31"
+          allowed_position_type: "D"
+          rescue_exclusion_reasons: [R01]
+          # Rescata solo vencidos por R01, con tipo D y saldo pendiente positivo.
+
+  G3_MARKING:
+    name: "Grupo 3 — Clasificación y marcado"
+    control_point_out: C3
+    rules:
+      - id: R04
+        name: "Valores pendientes < 0 en contratos no vencidos"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+        config:
+          column: "pending_planned_qty"
+          cutoff_date: "2025-12-31"
+      - id: R05
+        name: "Contratos que vencen en 2026"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+        config:
+          year: 2026
+      - id: M01
+        name: "Clasificación por tipo de posición"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+      - id: M02
+        name: "Clasificación por indicador de borrado"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+
+reporting:
+  profiling_summary:
+    - id: R01
+      label: "Fecha de vencimiento"
+      column: "validity_end"
+    - id: R02
+      label: "Tipo de contrato/posición"
+      column: "position_type"
+    - id: R06
+      label: "Monto del contrato"
+      column: "estimated_value"
+    - id: S01
+      label: "Grupo de compras"
+      column: "purchase_group"
+
+diagram:
+  title: "Lundin — Pipeline Contratos MLCC"
+  preamble:
+    - id: start
+      label: "DATOS\nRECIBIDOS"
+      shape: oval
+    - id: ingestion
+      label: "INGESTA\nPROFILING\nNORMALIZACIÓN"
+      shape: box
+    - id: C1
+      label: "CONTRATOS NORMALIZADOS"
+      shape: label
+      control_point: C1
+  group_output_labels:
+    G1_EXCLUSIONS: "CONTRATOS VIGENTES / TIPO D"
+  final_outputs:
+    - id: C3
+      label: "CONTRATOS MIGRAN\nCLASIFICADOS"
+      edge_label: "Migra"
+      kind: success
+      control_point: C3
+    - id: C2_NO_MIGRA
+      label: "CONTRATOS NO MIGRAN"
+      edge_label: "No migra"
+      kind: exclude
+      control_point: C2_NO_MIGRA

@@ -1,5 +1,10 @@
 # Pendientes
 
+## Split por dominio
+El pipeline ya soporta `contratos` y `ordenes-compra` con `--domain`, `inputs/MLCC/<dominio>/`
+y outputs separados en `outputs/<dominio>/`. Pendiente opcional: retirar compatibilidad antigua en
+`src/rules/` y centralizar totalmente los wrappers/implementaciones en los paquetes de dominio.
+
 ## Deduplicación a nivel contrato (posterior a todas las reglas)
 El pipeline opera sobre filas (posiciones SAP). La reducción a contratos únicos, reteniendo
 la fecha de vencimiento más reciente, queda pendiente como etapa final del flujo.
@@ -15,3 +20,11 @@ pending_planned_qty > 0. No revoca exclusiones por tipo de contrato/posición.
 
 Pendiente solo si aparecen rescates futuros: formalizar una matriz configurable para declarar
 qué reglas RESCUE pueden revocar qué reglas EXCLUDE.
+
+## Reglas PO
+La primera versión de `ordenes-compra` reutiliza la taxonomía G1/G2/G3 y agrega una marca
+para `account_assignment_type == K` como proxy de cargo directo a centro de costo.
+
+Pendiente de negocio: confirmar si la exclusión por tipo de posición en PO debe usar siempre
+la semántica descriptiva de `Tipo de posición.1` (`D/C/V/L/P`) o si hay códigos numéricos
+adicionales de `Tipo de posición` que deban considerarse equivalentes a servicio.

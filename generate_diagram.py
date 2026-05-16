@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 
+from src.config.domains import DOMAIN_CONFIGS
 from src.config.settings import Settings
 from src.diagram.flowchart import generate_flowchart
 
@@ -22,15 +23,18 @@ def main() -> None:
                         help="Ruta de salida sin extensión (default: outputs/diagrama_pipeline)")
     parser.add_argument("--operation", default="MLCC", choices=["MLCC"],
                         help="Operación para mostrar reglas activas (default: MLCC)")
+    parser.add_argument("--domain", "-d", default="contratos",
+                        choices=sorted(config.cli_name for config in DOMAIN_CONFIGS.values()),
+                        help="Dominio para el diagrama (default: contratos)")
     args = parser.parse_args()
 
-    settings = Settings()
+    settings = Settings(domain=args.domain)
     settings.ensure_dirs()
 
     output_path = (
         Path(args.output)
         if args.output
-        else settings.outputs_dir / "diagrama_pipeline"
+        else settings.domain_outputs_dir / "diagrama_pipeline"
     )
     # Add extension for clarity (flowchart.py will handle actual suffix)
     output_path = output_path.with_suffix(f".{args.format}")
@@ -40,7 +44,7 @@ def main() -> None:
         output_path=output_path,
         fmt=args.format,
         operation=args.operation,
-        control_points_dir=settings.control_points_dir,
+        control_points_dir=settings.domain_control_points_dir,
     )
     print(f"Diagrama generado: {result}")
 

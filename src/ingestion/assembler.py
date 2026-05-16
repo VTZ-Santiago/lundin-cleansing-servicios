@@ -1,3 +1,4 @@
+import importlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -7,15 +8,6 @@ import pandas as pd
 from src.config.settings import Settings
 from src.lineage.records import FieldLineageRecord, StageManifest
 from src.lineage.report import LineageReport
-from src.schema.field_map_mlcc import (
-    MLCC_DTYPE_COERCIONS,
-    MLCC_RAW_TO_CANONICAL,
-    normalize_header,
-)
-
-_FIELD_MAPS: dict[str, tuple[dict, dict]] = {
-    "MLCC": (MLCC_RAW_TO_CANONICAL, MLCC_DTYPE_COERCIONS),
-}
 
 
 @dataclass
@@ -36,12 +28,13 @@ def _map_headers(
     df_raw: pd.DataFrame,
     raw_to_canonical: dict[str, str],
     source_file: str,
+    header_normalizer,
 ) -> tuple[pd.DataFrame, list[FieldLineageRecord]]:
     rename_map: dict[str, str] = {}
     records: list[FieldLineageRecord] = []
 
     for col in df_raw.columns:
-        normalized = normalize_header(str(col))
+        normalized = header_normalizer(str(col))
         if normalized in raw_to_canonical:
             canonical = raw_to_canonical[normalized]
             rename_map[col] = canonical
@@ -89,7 +82,22 @@ def _apply_dtype_coercions(df: pd.DataFrame, coercions: dict[str, str]) -> pd.Da
     return df
 
 
-class ContractAssembler:
+def _load_field_map_config(domain: str, operation: str) -> tuple[dict, dict, object]:
+    module_name = f"src.{domain}.schema.field_map_{operation.lower()}"
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ValueError(
+            f"No field map module found for domain={domain}, operation={operation}: {module_name}"
+        ) from exc
+
+    raw_to_canonical = getattr(module, f"{operation}_RAW_TO_CANONICAL")
+    dtype_coercions = getattr(module, f"{operation}_DTYPE_COERCIONS")
+    header_normalizer = getattr(module, "normalize_header")
+    return raw_to_canonical, dtype_coercions, header_normalizer
+
+
+class DomainAssembler:
     def __init__(self, settings: Settings):
         self.settings = settings
 
@@ -98,10 +106,10 @@ class ContractAssembler:
     ) -> tuple[pd.DataFrame, LineageReport, list[StageManifest], AssemblyStats]:
         started = datetime.now()
         op = operation.upper()
-        if op not in _FIELD_MAPS:
-            raise ValueError(f"Unknown operation: {op}. Supported: {list(_FIELD_MAPS)}")
-
-        raw_to_canonical, dtype_coercions = _FIELD_MAPS[op]
+        raw_to_canonical, dtype_coercions, header_normalizer = _load_field_map_config(
+            self.settings.domain,
+            op,
+        )
         files = self.settings.input_files(op)
         all_frames: list[pd.DataFrame] = []
         all_records: list[FieldLineageRecord] = []
@@ -109,7 +117,12 @@ class ContractAssembler:
 
         for path in files:
             df_raw = pd.read_excel(path, dtype=object)
-            df_mapped, records = _map_headers(df_raw, raw_to_canonical, path.name)
+            df_mapped, records = _map_headers(
+                df_raw,
+                raw_to_canonical,
+                path.name,
+                header_normalizer,
+            )
             df_mapped = df_mapped.copy()  # defragment before adding new columns
 
             # Forward-fill purchase_document within this file.
@@ -202,3 +215,6 @@ class ContractAssembler:
         )
 
         return master, report, [ingestion_manifest, schema_manifest], stats
+
+
+ContractAssembler = DomainAssembler
