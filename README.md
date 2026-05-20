@@ -115,7 +115,7 @@ venv\Scripts\python.exe -m compileall src pipeline.py generate_diagram.py
 
 Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Stages**, **Profiling**. Los diagramas se generan por dominio en `outputs/<dominio>/diagrama_pipeline.*`.
 
-El reporte estadístico de contratos conserva volumen, grupo de compras, monto, tipo de posición, vigencia y borrado. El reporte estadístico de PO reemplaza el bloque de grupo/monto por clasificación `Cl.documento compras`, resumen de `Contrato marco` y una hoja adicional `Contrato Marco` con el conteo de PO asociadas a cada contrato marco.
+El reporte estadístico de contratos conserva volumen, grupo de compras, monto, tipo de posición, vigencia y borrado. El reporte estadístico de PO reemplaza el bloque de grupo/monto por clasificación `Cl.documento compras`, conserva la vigencia por validez, agrega un bloque adicional por `Fecha de entrega`, incluye resumen de `Contrato marco` y una hoja adicional `Contrato Marco` con el conteo de PO asociadas a cada contrato marco.
 
 ---
 

@@ -31,6 +31,21 @@ _SEC_DATA_BG = {
     "cruce":    "FFEDD5",
     "borrado":  "EDE9FE",
 }
+_DOC_CLASS_DESCRIPTIONS = {
+    "FO": "Pedido Marco",
+    "NB": "Pedido Estándar",
+    "UD": "Stock transport order",
+    "ZADI": "Ctto./ OC Asign. directa",
+    "ZAUT": "Pedido Automático",
+    "ZIMP": "OC para importación",
+    "ZLVM": "Pedido bajo valor mats.",
+    "ZLVS": "Pedido bajo valor servicios",
+    "ZPD1": "Donaciones",
+    "ZPDO": "Pedido donac. asig. Dir.",
+    "ZSCM": "Contrato menor",
+    "ZSCS": "Servicio Estándar",
+    "ZSEM": "Ctto./OC Emergencia",
+}
 _SEC_LABELS = {
     "periodo":  "",
     "volumen":  "Volumen",
@@ -58,6 +73,18 @@ def _fill(hex_bg: str) -> PatternFill:
     return PatternFill(start_color=hex_bg, end_color=hex_bg, fill_type="solid")
 
 
+def _section_labels(
+    date_section_label: str | None = None,
+    cruce_section_label: str | None = None,
+) -> dict[str, str]:
+    labels = dict(_SEC_LABELS)
+    if date_section_label is not None:
+        labels["vigencia"] = date_section_label
+    if cruce_section_label is not None:
+        labels["cruce"] = cruce_section_label
+    return labels
+
+
 def _extract_period(source_file: str) -> str:
     stem = Path(source_file).stem
     m = re.search(r"\d{4}[-_]\d{4}", stem)
@@ -83,11 +110,11 @@ def _value_specs(values: list[str], prefix: str, empty_label: str) -> list[tuple
     ]
 
 
-def _contracts_table(subset: pd.DataFrame) -> pd.DataFrame:
+def _contracts_table(subset: pd.DataFrame, date_column: str = "validity_end") -> pd.DataFrame:
     tmp = pd.DataFrame({
         "purchase_document": subset["purchase_document"].values,
-        "validity_end": pd.to_datetime(
-            subset["validity_end"].values if "validity_end" in subset.columns
+        "date_value": pd.to_datetime(
+            subset[date_column].values if date_column in subset.columns
             else [pd.NaT] * len(subset),
             errors="coerce",
         ),
@@ -113,7 +140,7 @@ def _contracts_table(subset: pd.DataFrame) -> pd.DataFrame:
     })
     tmp["purchase_group"] = tmp["purchase_group"].where(tmp["purchase_group"] != "", other="SIN_GRUPO")
     contracts = tmp.groupby("purchase_document").agg(
-        max_ve=("validity_end", "max"),
+        max_date=("date_value", "max"),
         dom_type=("position_type", lambda s: s.mode().iloc[0] if not s.empty else ""),
         dom_flag=("deletion_flag", lambda s: s.mode().iloc[0] if not s.empty else ""),
         dom_doc_class=("purchase_doc_class", lambda s: s.mode().iloc[0] if not s.empty else ""),
@@ -121,7 +148,7 @@ def _contracts_table(subset: pd.DataFrame) -> pd.DataFrame:
         dom_purchase_group=("purchase_group", lambda s: s.mode().iloc[0] if not s.empty else "SIN_GRUPO"),
         estimated_value_sum=("estimated_value", "sum"),
     )
-    contracts["yr"] = contracts["max_ve"].dt.year
+    contracts["yr"] = contracts["max_date"].dt.year
     return contracts
 
 
@@ -149,13 +176,14 @@ def _framework_stats(subset: pd.DataFrame, framework_contract_col: str) -> dict:
 def _period_stats(
     subset: pd.DataFrame,
     future_years: list[int],
+    date_column: str = "validity_end",
     include_purchase_amount_section: bool = True,
     doc_class_specs: list[tuple[str, str, str]] | None = None,
     include_framework_section: bool = False,
     framework_contract_col: str = "framework_contract",
 ) -> dict:
     doc_class_specs = doc_class_specs or []
-    c = _contracts_table(subset)
+    c = _contracts_table(subset, date_column=date_column)
     stats: dict = {
         "nro_lineas":    len(subset),
         "nro_contratos": len(c),
@@ -196,6 +224,45 @@ def _period_stats(
     return stats
 
 
+def _date_bucket_stats(
+    subset: pd.DataFrame,
+    future_years: list[int],
+    date_column: str,
+) -> dict:
+    c = _contracts_table(subset, date_column=date_column)
+    stats: dict = {
+        "yr_leq2025": int((c["yr"] <= 2025).sum()),
+    }
+    for yr in future_years:
+        stats[f"yr_{yr}"] = int((c["yr"] == yr).sum())
+    stats["yr_sin_fecha"] = int(c["yr"].isna().sum())
+    return stats
+
+
+def _date_bucket_rows(
+    df: pd.DataFrame,
+    future_years: list[int],
+    date_column: str,
+    operation: str,
+) -> list[dict]:
+    period_rows: list[dict] = []
+    if "_source_file" in df.columns:
+        src_files = sorted(df["_source_file"].unique(), key=lambda s: _extract_period(s))
+        for src_file in src_files:
+            subset = df[df["_source_file"] == src_file]
+            stats = _date_bucket_stats(subset, future_years, date_column)
+            stats["periodo"] = _extract_period(str(src_file))
+            period_rows.append(stats)
+    else:
+        stats = _date_bucket_stats(df, future_years, date_column)
+        stats["periodo"] = operation
+        period_rows.append(stats)
+
+    total = _date_bucket_stats(df, future_years, date_column)
+    total["periodo"] = "TOTAL"
+    return period_rows + [total]
+
+
 def _remap_cruce(row_data: dict, pfx: str, future_years: list[int]) -> dict:
     """Return row_data with d_* cruce keys replaced by pfx_* values."""
     remapped = dict(row_data)
@@ -210,6 +277,10 @@ def _col_defs(
     include_purchase_amount_section: bool = True,
     doc_class_specs: list[tuple[str, str, str]] | None = None,
     include_framework_section: bool = False,
+    date_past_label: str = "Vencidos hasta 2025",
+    date_future_label_prefix: str = "Vigentes en",
+    date_empty_label: str = "Sin fecha de vencimiento",
+    date_empty_note: str = "(validity_end vacío)",
 ) -> list[tuple[str, str, str, str]]:
     doc_class_specs = doc_class_specs or []
     d: list[tuple[str, str, str, str]] = []
@@ -232,7 +303,8 @@ def _col_defs(
 
     if doc_class_specs:
         for _, key, label in doc_class_specs:
-            d.append(("doc_class", key, f"Clase {label}", "(Cl.documento compras)"))
+            description = _DOC_CLASS_DESCRIPTIONS.get(label, "")
+            d.append(("doc_class", key, f"Clase {label}", f"({description})" if description else ""))
         d += [("_sep_1c", "_sep_1c", "", "")]
 
     if include_framework_section:
@@ -252,18 +324,18 @@ def _col_defs(
     ]
     d += [("_sep_2", "_sep_2", "", "")]
 
-    d += [("vigencia", "yr_leq2025", "Vencidos hasta 2025",
+    d += [("vigencia", "yr_leq2025", date_past_label,
            "(cualquier año ≤ 2025 — agrupados)")]
     for yr in future_years:
-        d.append(("vigencia", f"yr_{yr}", f"Vigentes en {yr}", f"(vencimiento en {yr})"))
-    d.append(("vigencia", "yr_sin_fecha", "Sin fecha de vencimiento", "(validity_end vacío)"))
+        d.append(("vigencia", f"yr_{yr}", f"{date_future_label_prefix} {yr}", f"(año {yr})"))
+    d.append(("vigencia", "yr_sin_fecha", date_empty_label, date_empty_note))
     d += [("_sep_3", "_sep_3", "", "")]
 
     # Cruce — columnas genéricas (el bloque activo lo indica la fila de etiqueta)
-    d.append(("cruce", "d_leq2025", "× Vencidos ≤ 2025",
-              "(tipo según bloque — vencimiento agrupado)"))
+    d.append(("cruce", "d_leq2025", f"× {date_past_label.replace('hasta', '≤')}",
+              "(tipo según bloque — año agrupado)"))
     for yr in future_years:
-        d.append(("cruce", f"d_{yr}", f"× Vigentes {yr}", f"(tipo según bloque — año {yr})"))
+        d.append(("cruce", f"d_{yr}", f"× {date_future_label_prefix} {yr}", f"(tipo según bloque — año {yr})"))
     d += [("_sep_4", "_sep_4", "", "")]
 
     d += [
@@ -274,7 +346,8 @@ def _col_defs(
     return d
 
 
-def _write_section_headers(ws, col_defs: list) -> None:
+def _write_section_headers(ws, col_defs: list, section_labels: dict[str, str] | None = None) -> None:
+    section_labels = section_labels or _SEC_LABELS
     n = len(col_defs)
     groups: list[tuple[str, int, int]] = []
     cur_sec, start = col_defs[0][0], 1
@@ -292,7 +365,7 @@ def _write_section_headers(ws, col_defs: list) -> None:
         if _is_sep(sec):
             cell.fill = _fill(_SEP_BG)
         else:
-            cell.value = _SEC_LABELS.get(sec, sec)
+            cell.value = section_labels.get(sec, sec)
             cell.font = Font(bold=True, color="FFFFFF", size=10)
             cell.fill = _fill(_SEC_HDR_BG.get(sec, "374151"))
             cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -377,6 +450,118 @@ def _write_block_label(ws, row_n: int, col_defs: list, label: str) -> int:
     lc.alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[row_n].height = 18
     return row_n + 1
+
+
+def _write_section_block_label(ws, row_n: int, col_defs: list, section: str, label: str) -> int:
+    section_start = section_end = None
+    for col_idx, (sec, *_) in enumerate(col_defs, 1):
+        if sec == section:
+            if section_start is None:
+                section_start = col_idx
+            section_end = col_idx
+
+    for col_idx, (sec, *_) in enumerate(col_defs, 1):
+        cell = ws.cell(row=row_n, column=col_idx)
+        if _is_sep(sec):
+            cell.fill = _fill(_SEP_BG)
+        elif sec == section:
+            cell.fill = _fill(_SEC_HDR_BG.get(section, "374151"))
+        else:
+            cell.fill = _fill(_GRAY_CELL)
+
+    if section_start is not None and section_end is not None and section_end >= section_start:
+        ws.merge_cells(start_row=row_n, start_column=section_start,
+                       end_row=row_n, end_column=section_end)
+    cell = ws.cell(row=row_n, column=section_start or 1, value=f"  {label}")
+    cell.font = Font(bold=True, size=10, color="FFFFFF")
+    cell.fill = _fill(_SEC_HDR_BG.get(section, "374151"))
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[row_n].height = 18
+    return row_n + 1
+
+
+def _write_date_only_rows(ws, rows: list[dict], col_defs: list, start_row: int) -> int:
+    row_n = start_row
+    for row_data in rows:
+        is_total = row_data["periodo"] == "TOTAL"
+        for col_idx, (sec, key, *_) in enumerate(col_defs, 1):
+            cell = ws.cell(row=row_n, column=col_idx)
+            if _is_sep(sec):
+                cell.fill = _fill(_SEP_BG)
+                continue
+            if key == "periodo":
+                cell.value = row_data.get("periodo", "")
+                if is_total:
+                    cell.font = Font(bold=True, size=10, color="FFFFFF")
+                    cell.fill = _fill(_TOTALS_BG)
+                else:
+                    cell.fill = _fill(_SEC_DATA_BG["periodo"])
+                    cell.font = Font(bold=True, size=10)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                continue
+            if sec != "vigencia":
+                cell.fill = _fill(_GRAY_CELL)
+                continue
+            cell.value = row_data.get(key, 0)
+            if is_total:
+                cell.font = Font(bold=True, size=10, color="FFFFFF")
+                cell.fill = _fill(_TOTALS_BG)
+            else:
+                cell.font = Font(size=10)
+                cell.fill = _fill(_SEC_DATA_BG["vigencia"])
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            cell.number_format = "#,##0"
+        ws.row_dimensions[row_n].height = 18
+        row_n += 1
+    return row_n
+
+
+def _overlay_section_block_label(ws, row_n: int, col_defs: list, section: str, label: str) -> None:
+    section_start = section_end = None
+    for col_idx, (sec, *_) in enumerate(col_defs, 1):
+        if sec == section:
+            if section_start is None:
+                section_start = col_idx
+            section_end = col_idx
+
+    if section_start is None or section_end is None:
+        return
+
+    ws.merge_cells(start_row=row_n, start_column=section_start,
+                   end_row=row_n, end_column=section_end)
+    cell = ws.cell(row=row_n, column=section_start, value=f"  {label}")
+    cell.font = Font(bold=True, size=10, color="FFFFFF")
+    cell.fill = _fill(_SEC_HDR_BG.get(section, "374151"))
+    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+
+def _overlay_date_only_rows(ws, rows: list[dict], col_defs: list, start_row: int) -> None:
+    for row_offset, row_data in enumerate(rows):
+        row_n = start_row + row_offset
+        is_total = row_data["periodo"] == "TOTAL"
+        for col_idx, (sec, key, *_) in enumerate(col_defs, 1):
+            if key != "periodo" and sec != "vigencia":
+                continue
+            cell = ws.cell(row=row_n, column=col_idx)
+            if key == "periodo":
+                cell.value = row_data.get("periodo", "")
+                if is_total:
+                    cell.font = Font(bold=True, size=10, color="FFFFFF")
+                    cell.fill = _fill(_TOTALS_BG)
+                else:
+                    cell.fill = _fill(_SEC_DATA_BG["periodo"])
+                    cell.font = Font(bold=True, size=10)
+                cell.alignment = Alignment(horizontal="left", vertical="center")
+                continue
+            cell.value = row_data.get(key, 0)
+            if is_total:
+                cell.font = Font(bold=True, size=10, color="FFFFFF")
+                cell.fill = _fill(_TOTALS_BG)
+            else:
+                cell.font = Font(size=10)
+                cell.fill = _fill(_SEC_DATA_BG["vigencia"])
+            cell.alignment = Alignment(horizontal="right", vertical="center")
+            cell.number_format = "#,##0"
 
 
 def _write_framework_detail_sheet(
@@ -466,20 +651,34 @@ def generate_stats_report(
     dataset_label: str = "Universo Completo — C1 (pre-reglas)",
     entity_label: str = "Contratos",
     file_suffix: str | None = None,
+    date_column: str = "validity_end",
+    date_section_label: str | None = None,
+    cruce_section_label: str | None = None,
+    date_past_label: str = "Vencidos hasta 2025",
+    date_future_label_prefix: str = "Vigentes en",
+    date_empty_label: str = "Sin fecha de vencimiento",
+    date_empty_note: str = "(validity_end vacío)",
+    include_delivery_date_section: bool = False,
+    delivery_date_column: str = "delivery_date",
+    delivery_date_label: str = "FECHA DE ENTREGA — fecha de entrega más reciente por documento",
     include_purchase_amount_section: bool = True,
     include_doc_class_section: bool = False,
     include_framework_section: bool = False,
     framework_contract_col: str = "framework_contract",
 ) -> Path:
-    if "validity_end" in df.columns:
-        ve = pd.to_datetime(df["validity_end"], errors="coerce")
+    if date_column in df.columns:
+        ve = pd.to_datetime(df[date_column], errors="coerce")
         future_years = sorted({int(y) for y in ve.dropna().dt.year.unique() if y >= 2026})
     else:
         future_years = []
+    if include_delivery_date_section and delivery_date_column in df.columns:
+        delivery_dates = pd.to_datetime(df[delivery_date_column], errors="coerce")
+        delivery_years = {int(y) for y in delivery_dates.dropna().dt.year.unique() if y >= 2026}
+        future_years = sorted(set(future_years) | delivery_years)
 
     doc_class_specs: list[tuple[str, str, str]] = []
     if include_doc_class_section:
-        contracts = _contracts_table(df)
+        contracts = _contracts_table(df, date_column=date_column)
         doc_class_specs = _value_specs(
             contracts["dom_doc_class"].fillna("").astype(str).str.strip().tolist(),
             "doc_class",
@@ -496,6 +695,7 @@ def generate_stats_report(
             stats = _period_stats(
                 subset,
                 future_years,
+                date_column=date_column,
                 include_purchase_amount_section=include_purchase_amount_section,
                 doc_class_specs=doc_class_specs,
                 include_framework_section=include_framework_section,
@@ -507,6 +707,7 @@ def generate_stats_report(
         stats = _period_stats(
             df,
             future_years,
+            date_column=date_column,
             include_purchase_amount_section=include_purchase_amount_section,
             doc_class_specs=doc_class_specs,
             include_framework_section=include_framework_section,
@@ -522,18 +723,27 @@ def generate_stats_report(
         purchase_group = purchase_group.where(purchase_group != "", other="SIN_GRUPO")
         total["grupos_compra"] = int(purchase_group.nunique())
     if include_doc_class_section:
-        contracts = _contracts_table(df)
+        contracts = _contracts_table(df, date_column=date_column)
         for value, key, _ in doc_class_specs:
             total[key] = int((contracts["dom_doc_class"] == value).sum())
     if include_framework_section:
         total.update(_framework_stats(df, framework_contract_col))
     all_rows = period_rows + [total]
+    delivery_rows = (
+        _date_bucket_rows(df, future_years, delivery_date_column, operation)
+        if include_delivery_date_section and delivery_date_column in df.columns
+        else []
+    )
 
     col_defs = _col_defs(
         future_years,
         include_purchase_amount_section=include_purchase_amount_section,
         doc_class_specs=doc_class_specs,
         include_framework_section=include_framework_section,
+        date_past_label=date_past_label,
+        date_future_label_prefix=date_future_label_prefix,
+        date_empty_label=date_empty_label,
+        date_empty_note=date_empty_note,
     )
     ncols = len(col_defs)
 
@@ -554,7 +764,14 @@ def generate_stats_report(
     ws.row_dimensions[1].height = 22
 
     # Fila 2 — Secciones fusionadas
-    _write_section_headers(ws, col_defs)
+    _write_section_headers(
+        ws,
+        col_defs,
+        _section_labels(
+            date_section_label=date_section_label,
+            cruce_section_label=cruce_section_label,
+        ),
+    )
     ws.row_dimensions[2].height = 20
 
     # Fila 3 — Sub-encabezados
@@ -575,6 +792,7 @@ def generate_stats_report(
     row_n = _write_data_rows(ws, all_rows, col_defs, row_n, only_cruce=False)
 
     # ── Bloques C, V, VACIO (sólo cruce — otras columnas en gris) ────────────
+    delivery_overlay_pending = bool(delivery_rows)
     for typ, pfx, label in _EXTRA_BLOCKS:
         # Fila en blanco
         for col_idx in range(1, ncols + 1):
@@ -583,11 +801,17 @@ def generate_stats_report(
         row_n += 1
 
         # Etiqueta del bloque
+        label_row = row_n
         row_n = _write_block_label(ws, row_n, col_defs, label)
 
         # Datos con cruce remapeado
+        data_start_row = row_n
         remapped_rows = [_remap_cruce(r, pfx, future_years) for r in all_rows]
         row_n = _write_data_rows(ws, remapped_rows, col_defs, row_n, only_cruce=True)
+        if delivery_overlay_pending:
+            _overlay_section_block_label(ws, label_row, col_defs, "vigencia", delivery_date_label)
+            _overlay_date_only_rows(ws, delivery_rows, col_defs, data_start_row)
+            delivery_overlay_pending = False
 
     # ── Anchos de columna ────────────────────────────────────────────────────
     for col_idx, (sec, key, *_) in enumerate(col_defs, 1):

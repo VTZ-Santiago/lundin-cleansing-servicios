@@ -26,6 +26,7 @@ CANONICAL_SCHEMA: list[CanonicalColumn] = [
     CanonicalColumn("short_text",              "Texto breve",                         "str",   True,  False, True,  "description"),
     CanonicalColumn("validity_start",          "In.período validez",                  "date",  True,  False, False, "dates"),
     CanonicalColumn("validity_end",            "Fin período validez",                 "date",  True,  False, True,  "dates"),
+    CanonicalColumn("delivery_date",           "Fecha de entrega",                    "date",  True,  False, False, "dates"),
     CanonicalColumn("article_group",           "Grupo de artículos",                  "str",   True,  False, False, "classification"),
     CanonicalColumn("deletion_flag",           "Indicador de borrado",                "str",   True,  False, False, "classification"),
     CanonicalColumn("position_type",           "Tipo de posición",                    "str",   True,  False, False, "classification"),

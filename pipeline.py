@@ -183,6 +183,7 @@ def run(operation: str, domain: str = "contratos") -> None:
         dataset_label=f"Universo Completo — C1 (pre-reglas, {len(master):,} filas)",
         entity_label=domain_cfg.display_name,
         file_suffix=domain_cfg.report_suffix,
+        include_delivery_date_section=is_purchase_order_domain,
         include_purchase_amount_section=not is_purchase_order_domain,
         include_doc_class_section=is_purchase_order_domain,
         include_framework_section=is_purchase_order_domain,
