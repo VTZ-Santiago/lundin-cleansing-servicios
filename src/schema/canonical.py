@@ -20,6 +20,7 @@ CANONICAL_SCHEMA: list[CanonicalColumn] = [
     CanonicalColumn("purchase_doc_type",       "Tipo doc.compras",                    "str",   True,  False, False, "classification"),
     CanonicalColumn("purchase_group",          "Grupo de compras",                    "str",   True,  False, False, "classification"),
     CanonicalColumn("order_history_ref",       "Historial pedido/Docu.orden entrega", "str",   True,  False, False, "identity"),
+    CanonicalColumn("framework_contract",      "Contrato marco",                      "str",   True,  False, False, "identity"),
     CanonicalColumn("document_date",           "Fecha documento",                     "date",  True,  False, False, "dates"),
     CanonicalColumn("vendor",                  "Proveedor/Centro suministrador",      "str",   True,  False, True,  "identity"),
     CanonicalColumn("short_text",              "Texto breve",                         "str",   True,  False, True,  "description"),

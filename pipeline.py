@@ -177,10 +177,15 @@ def run(operation: str, domain: str = "contratos") -> None:
         )
 
     # --- Reporte estadístico independiente (C1 — universo pre-reglas) ---
+    is_purchase_order_domain = domain_cfg.package_name == "ordenes_compra"
     rpt = generate_stats_report(
         master, operation, settings.domain_outputs_dir,
         dataset_label=f"Universo Completo — C1 (pre-reglas, {len(master):,} filas)",
         entity_label=domain_cfg.display_name,
+        file_suffix=domain_cfg.report_suffix,
+        include_purchase_amount_section=not is_purchase_order_domain,
+        include_doc_class_section=is_purchase_order_domain,
+        include_framework_section=is_purchase_order_domain,
     )
     log.info("  Reporte estadistico:      %s", rpt.name)
 

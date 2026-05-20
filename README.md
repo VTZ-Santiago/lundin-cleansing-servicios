@@ -107,15 +107,15 @@ venv\Scripts\python.exe -m compileall src pipeline.py generate_diagram.py
 | `outputs/contratos/control_points/C1_MLCC.xlsx` | Post-ingesta contratos |
 | `outputs/contratos/control_points/C2_NO_MIGRA_MLCC.xlsx` | Contratos no migran |
 | `outputs/contratos/control_points/C3_MLCC.xlsx` | Contratos migran |
-| `outputs/contratos/reporte_estadistico_MLCC.xlsx` | Resumen estadístico contratos |
+| `outputs/contratos/reporte_estadistico_MLCC-contratos.xlsx` | Resumen estadístico contratos |
 | `outputs/ordenes_compra/control_points/C1_MLCC.xlsx` | Post-ingesta órdenes de compra |
 | `outputs/ordenes_compra/control_points/C2_NO_MIGRA_MLCC.xlsx` | Órdenes no migran |
 | `outputs/ordenes_compra/control_points/C3_MLCC.xlsx` | Órdenes migran |
-| `outputs/ordenes_compra/reporte_estadistico_MLCC.xlsx` | Resumen estadístico órdenes de compra |
+| `outputs/ordenes_compra/reporte_estadistico_MLCC-PO.xlsx` | Resumen estadístico órdenes de compra, con clasificación por documento y contrato marco |
 
 Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Stages**, **Profiling**. Los diagramas se generan por dominio en `outputs/<dominio>/diagrama_pipeline.*`.
 
-Los resúmenes de control incluyen fecha de vencimiento, tipo de posición, monto cuando exista, grupo de compras y, para PO, el marcado de cargos directos a centro de costo.
+El reporte estadístico de contratos conserva volumen, grupo de compras, monto, tipo de posición, vigencia y borrado. El reporte estadístico de PO reemplaza el bloque de grupo/monto por clasificación `Cl.documento compras`, resumen de `Contrato marco` y una hoja adicional `Contrato Marco` con el conteo de PO asociadas a cada contrato marco.
 
 ---
 

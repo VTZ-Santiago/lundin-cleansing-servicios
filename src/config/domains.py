@@ -8,6 +8,7 @@ class DomainConfig:
     input_subdir: str
     display_name: str
     output_suffix: str
+    report_suffix: str
 
 
 _DOMAIN_ALIASES: dict[str, str] = {
@@ -27,6 +28,7 @@ DOMAIN_CONFIGS: dict[str, DomainConfig] = {
         input_subdir="contratos",
         display_name="Contratos",
         output_suffix="contratos",
+        report_suffix="contratos",
     ),
     "ordenes_compra": DomainConfig(
         cli_name="ordenes-compra",
@@ -34,6 +36,7 @@ DOMAIN_CONFIGS: dict[str, DomainConfig] = {
         input_subdir="ordenes-compra",
         display_name="Ordenes de Compra",
         output_suffix="ordenes_compra",
+        report_suffix="PO",
     ),
 }
 
