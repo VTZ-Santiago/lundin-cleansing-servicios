@@ -1,6 +1,7 @@
 import pandas as pd
 
 from src.rules.base import RuleResult
+from src.utils.date_logic import effective_validity_dates
 
 
 def apply(df: pd.DataFrame, operation: str, config: dict) -> RuleResult:
@@ -9,7 +10,7 @@ def apply(df: pd.DataFrame, operation: str, config: dict) -> RuleResult:
     allowed_position_type = str(config.get("allowed_position_type", "D")).strip().upper()
     rescue_reasons = set(config.get("rescue_exclusion_reasons", ["R01"]))
 
-    dates = pd.to_datetime(df.get("validity_end", pd.Series(pd.NaT, index=df.index)), errors="coerce")
+    dates = effective_validity_dates(df)
     qty = pd.to_numeric(df.get(column, pd.Series(pd.NA, index=df.index)), errors="coerce")
     position_type = (
         df.get("position_type", pd.Series("", index=df.index))

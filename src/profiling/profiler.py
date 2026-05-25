@@ -5,6 +5,7 @@ import pandas as pd
 
 from src.lineage.records import StageManifest
 from src.schema.canonical import CANONICAL_BY_NAME, CANONICAL_NAMES
+from src.utils.date_logic import effective_validity_dates
 
 
 @dataclass
@@ -45,7 +46,7 @@ class ProfilingResult:
     total_rows: int
     total_columns: int
     column_profiles: list[ColumnProfile]
-    validity_end_by_year: dict[int, int] = field(default_factory=dict)
+    effective_validity_by_year: dict[int, int] = field(default_factory=dict)
     vendor_top10: list[tuple[str, int]] = field(default_factory=list)
     plant_distribution: dict[str, int] = field(default_factory=dict)
     source_file_counts: dict[str, int] = field(default_factory=dict)
@@ -105,8 +106,8 @@ class DataProfiler:
 
         # Contract-specific insights
         validity_by_year: dict[int, int] = {}
-        if "validity_end" in df.columns:
-            dates = pd.to_datetime(df["validity_end"], errors="coerce").dropna()
+        if "validity_end" in df.columns or "delivery_date" in df.columns:
+            dates = effective_validity_dates(df).dropna()
             validity_by_year = {
                 int(k): int(v)
                 for k, v in dates.dt.year.value_counts().sort_index().items()
@@ -179,7 +180,7 @@ class DataProfiler:
             total_rows=len(df),
             total_columns=len(df.columns),
             column_profiles=profiles,
-            validity_end_by_year=validity_by_year,
+            effective_validity_by_year=validity_by_year,
             vendor_top10=vendor_top10,
             plant_distribution=plant_dist,
             source_file_counts=source_counts,

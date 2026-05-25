@@ -33,6 +33,8 @@ G3 — Clasificación y marcado (R04/R05 + marcas técnicas + regla PO de imputa
 
 **Invariante de reconciliación:** `C1 = C3 + C2_NO_MIGRA`
 
+Para la segmentación por vigencia del flujo, la fecha efectiva usa `validity_end` (← `Fin período validez`) y, cuando viene vacía, cae en `delivery_date` (← `Fecha de entrega`).
+
 ---
 
 ## Estructura
@@ -141,7 +143,7 @@ Configuración por dominio en [src/contratos/rules/rules.yaml](src/contratos/rul
 ## Esquema canónico
 
 El pipeline normaliza los 29 headers en español a nombres canónicos en inglés.
-La columna clave para la regla de exclusión es `validity_end` (← `Fin período validez`).
+La fecha clave para las reglas de vigencia es `validity_end` (← `Fin período validez`), con fallback a `delivery_date` (← `Fecha de entrega`) cuando el primer campo viene vacío.
 
 Grain key de MLCC: (`purchase_document`, `position`)
 

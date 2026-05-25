@@ -1,15 +1,17 @@
 import pandas as pd
 
 from src.rules.base import RuleResult
+from src.utils.date_logic import effective_validity_dates
 
 
 def apply(df: pd.DataFrame, operation: str, config: dict) -> RuleResult:
-    """Exclude contracts with validity_end on or before cutoff_date.
+    """Exclude rows whose effective validity date is on or before cutoff_date.
 
-    Rows with NaT validity_end are NOT excluded (unknown expiry treated as active).
+    The flow uses ``validity_end`` first and falls back to ``delivery_date`` when
+    the primary field is empty. Rows with no effective date are not excluded.
     """
     cutoff = pd.Timestamp(config["cutoff_date"])
-    dates = pd.to_datetime(df["validity_end"], errors="coerce")
+    dates = effective_validity_dates(df)
     mask = dates.notna() & (dates <= cutoff)
     reason = mask.map({True: "R01", False: ""})
     return RuleResult("R01", mask, reason)

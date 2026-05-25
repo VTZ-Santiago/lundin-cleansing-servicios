@@ -12,6 +12,7 @@ from src.lineage.records import IssueRecord, StageManifest
 from src.lineage.report import LineageReport
 from src.profiling.profiler import ProfilingResult
 from src.schema.canonical import CANONICAL_NAMES
+from src.utils.date_logic import effective_validity_dates
 
 # --- Colour palette ---
 _HDR_DARK = "1E3A5F"
@@ -83,8 +84,8 @@ def _build_analysis_rows(df: pd.DataFrame) -> tuple[list[dict], list[int]]:
         return [], []
 
     years: set[int] = set()
-    if "validity_end" in df.columns:
-        parsed = pd.to_datetime(df["validity_end"], errors="coerce")
+    if "validity_end" in df.columns or "delivery_date" in df.columns:
+        parsed = effective_validity_dates(df)
         years = {int(y) for y in parsed.dropna().dt.year.unique()}
 
     sorted_years = sorted(years)
@@ -148,9 +149,9 @@ def _build_analysis_rows(df: pd.DataFrame) -> tuple[list[dict], list[int]]:
             for v in ("L", "S", "SIN_FLAG"):
                 row[f"flag_{v}"] = 0
 
-        # contracts per validity_end year (unique purchase_document per year)
-        if "validity_end" in subset.columns and "purchase_document" in subset.columns:
-            ve = pd.to_datetime(subset["validity_end"], errors="coerce")
+        # contracts per effective validity year (unique purchase_document per year)
+        if ("validity_end" in subset.columns or "delivery_date" in subset.columns) and "purchase_document" in subset.columns:
+            ve = effective_validity_dates(subset)
             for yr in sorted_years:
                 mask = ve.dt.year == yr
                 row[f"yr_{yr}"] = int(subset.loc[mask, "purchase_document"].nunique())
@@ -356,14 +357,14 @@ def _write_profiling(wb: Workbook, profiling: ProfilingResult) -> None:
 
     offset = len(profiles_sorted) + 4
 
-    # Validity-end by year as a summary block below the main table
-    if profiling.validity_end_by_year:
-        ws.cell(row=offset, column=1, value="Distribución validity_end por año").font = Font(bold=True)
+    # Effective validity date by year as a summary block below the main table
+    if profiling.effective_validity_by_year:
+        ws.cell(row=offset, column=1, value="Distribución fecha de vigencia efectiva por año").font = Font(bold=True)
         ws.cell(row=offset, column=2, value="Contratos")
-        for i, (yr, cnt) in enumerate(sorted(profiling.validity_end_by_year.items()), 1):
+        for i, (yr, cnt) in enumerate(sorted(profiling.effective_validity_by_year.items()), 1):
             ws.cell(row=offset + i, column=1, value=yr)
             ws.cell(row=offset + i, column=2, value=cnt)
-        offset += len(profiling.validity_end_by_year) + 3
+        offset += len(profiling.effective_validity_by_year) + 3
 
     # Source file counts
     if profiling.source_file_counts:
