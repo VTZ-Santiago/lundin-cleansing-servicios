@@ -54,13 +54,13 @@ def _normalize_material_key(series: pd.Series) -> pd.Series:
     return normalize_material_key(series)
 
 
-def extract_source_materials(domain: str, inputs_root: Path) -> pd.DataFrame:
-    """Load all source files for a domain and return a flat DataFrame of rows with material info."""
+def extract_source_materials(domain: str, inputs_root: Path, operation: str = "MLCC") -> pd.DataFrame:
+    """Load all source files for a domain/operation and return a flat DataFrame."""
     cfg = DOMAIN_CONFIGS.get(domain)
     if cfg is None:
         raise ValueError(f"Unknown domain: {domain}")
 
-    source_dir = inputs_root / "MLCC" / cfg.input_subdir
+    source_dir = inputs_root / operation.upper() / cfg.input_subdir
     files = [
         f for f in sorted(source_dir.glob("*.XLSX")) + sorted(source_dir.glob("*.xlsx"))
         if not f.name.startswith("~$")
@@ -72,6 +72,7 @@ def extract_source_materials(domain: str, inputs_root: Path) -> pd.DataFrame:
     for f in files:
         df = _read_source_file(f)
         df["domain"] = domain
+        df["operation"] = operation.upper()
         frames.append(df)
 
     master = pd.concat(frames, ignore_index=True, join="outer")
@@ -91,38 +92,37 @@ def extract_source_materials(domain: str, inputs_root: Path) -> pd.DataFrame:
 
 
 def build_unique_materials(source_df: pd.DataFrame) -> pd.DataFrame:
-    """Deduplicate source rows to one row per (material_key, domain) with aggregated context."""
+    """Deduplicate source rows to one row per (material_key, operation, domain)."""
+    group_cols = [c for c in ("material_key", "operation", "domain") if c in source_df.columns]
     rows = []
-    for (key, domain), grp in source_df.groupby(["material_key", "domain"], sort=False):
-        pos_types = grp["position_type"].dropna().unique().tolist() if "position_type" in grp.columns else []
+    for group_vals, grp in source_df.groupby(group_cols, sort=False):
+        vals = group_vals if isinstance(group_vals, tuple) else (group_vals,)
+        meta = dict(zip(group_cols, vals))
+
+        pos_types    = grp["position_type"].dropna().unique().tolist() if "position_type" in grp.columns else []
         assign_types = grp["account_assignment_type"].dropna().unique().tolist() if "account_assignment_type" in grp.columns else []
 
-        # First non-null short_text as representative description from source
-        short_text_src = grp["short_text"].dropna().iloc[0] if "short_text" in grp.columns and grp["short_text"].notna().any() else None
-        plant = grp["plant_code"].dropna().iloc[0] if "plant_code" in grp.columns and grp["plant_code"].notna().any() else None
-        pur_group = grp["purchase_group"].dropna().mode()
-        pur_group = pur_group.iloc[0] if not pur_group.empty else None
+        short_text_src = grp["short_text"].dropna().iloc[0]    if "short_text"    in grp.columns and grp["short_text"].notna().any()    else None
+        plant          = grp["plant_code"].dropna().iloc[0]     if "plant_code"    in grp.columns and grp["plant_code"].notna().any()     else None
+        pur_group_s    = grp["purchase_group"].dropna().mode()  if "purchase_group" in grp.columns else pd.Series(dtype=object)
+        pur_group      = pur_group_s.iloc[0] if not pur_group_s.empty else None
 
-        is_service_d = "D" in pos_types
+        is_service_d   = "D" in pos_types
         is_direct_cost = "K" in assign_types
-        is_service = is_service_d or is_direct_cost
 
-        rows.append(
-            {
-                "material_key": key,
-                "domain": domain,
-                "n_registros": len(grp),
-                "n_documentos": grp["purchase_document"].nunique() if "purchase_document" in grp.columns else 0,
-                "tipos_posicion": ", ".join(sorted(set(str(t) for t in pos_types))) if pos_types else "",
-                "tipos_imputacion": ", ".join(sorted(set(str(t) for t in assign_types))) if assign_types else "",
-                "descripcion_fuente": short_text_src,
-                "centro_fuente": plant,
-                "grupo_compras": pur_group,
-                "is_service": is_service,
-                "is_service_d": is_service_d,
-                "is_direct_cost": is_direct_cost,
-            }
-        )
+        rows.append({
+            **meta,
+            "n_registros":        len(grp),
+            "n_documentos":       grp["purchase_document"].nunique() if "purchase_document" in grp.columns else 0,
+            "tipos_posicion":     ", ".join(sorted(set(str(t) for t in pos_types)))    if pos_types    else "",
+            "tipos_imputacion":   ", ".join(sorted(set(str(t) for t in assign_types))) if assign_types else "",
+            "descripcion_fuente": short_text_src,
+            "centro_fuente":      plant,
+            "grupo_compras":      pur_group,
+            "is_service":         is_service_d or is_direct_cost,
+            "is_service_d":       is_service_d,
+            "is_direct_cost":     is_direct_cost,
+        })
 
     return pd.DataFrame(rows)
 

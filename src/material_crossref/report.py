@@ -73,36 +73,44 @@ def _build_resumen_sheet(ws, enriched_df: pd.DataFrame, domains: list[str]) -> N
     sections += [
         ("", ""),
         ("=== COBERTURA GENERAL ===", ""),
-        ("Total materiales únicos (ambos dominios)", total),
-        ("Encontrados en maestro de materiales", int(in_master)),
+        ("Total materiales unicos", total),
+        ("Encontrados en maestro", int(in_master)),
         ("No encontrados en maestro", total - int(in_master)),
         ("% cobertura maestro", f"{in_master/total*100:.1f}%" if total else "N/A"),
-        ("Con datos de consumo histórico", int(has_consumo)),
+        ("Con datos de consumo historico", int(has_consumo)),
         ("% cobertura consumo", f"{has_consumo/total*100:.1f}%" if total else "N/A"),
         ("", ""),
     ]
 
-    for domain in domains:
-        sub = enriched_df[enriched_df["domain"] == domain]
-        n = len(sub)
-        n_m = sub["in_master"].sum()
-        sections += [
-            (f"=== DOMINIO: {domain.upper()} ===", ""),
-            (f"  Materiales únicos", n),
-            (f"  En maestro", int(n_m)),
-            (f"  % cobertura maestro", f"{n_m/n*100:.1f}%" if n else "N/A"),
-            ("", ""),
-        ]
+    # Breakdown by operation × domain
+    operations = enriched_df["operation"].unique().tolist() if "operation" in enriched_df.columns else [None]
+    for op in operations:
+        sub_op = enriched_df[enriched_df["operation"] == op] if op else enriched_df
+        op_label = op if op else "SIN OPERACION"
+        sections.append((f"=== OPERACION: {op_label} ===", ""))
+        for domain in domains:
+            sub = sub_op[sub_op["domain"] == domain] if "domain" in sub_op.columns else sub_op
+            n = len(sub)
+            if n == 0:
+                continue
+            n_m = sub["in_master"].sum()
+            sections += [
+                (f"  Dominio: {domain}", ""),
+                (f"    Materiales unicos", n),
+                (f"    En maestro", int(n_m)),
+                (f"    % cobertura maestro", f"{n_m/n*100:.1f}%"),
+            ]
+        sections.append(("", ""))
 
     sections += [
         ("=== MATERIALES DE SERVICIO (is_service) ===", ""),
         ("Total materiales de servicio", int(is_service)),
         ("Servicios en maestro", int(enriched_df[enriched_df["is_service"]]["in_master"].sum())),
         ("% servicios en maestro", f"{enriched_df[enriched_df['is_service']]['in_master'].sum()/is_service*100:.1f}%" if is_service else "N/A"),
-        ("  → Tipo posición D (servicio)", int(enriched_df["is_service_d"].sum())),
-        ("  → Imputación K (centro costo)", int(enriched_df["is_direct_cost"].sum())),
+        ("  Tipo posicion D", int(enriched_df["is_service_d"].sum())),
+        ("  Imputacion K (centro costo)", int(enriched_df["is_direct_cost"].sum())),
         ("", ""),
-        ("=== MAESTRO: DISTRIBUCIÓN POR TIPO MATERIAL ===", ""),
+        ("=== DISTRIBUCION POR TIPO MATERIAL ===", ""),
     ]
 
     if "tipo_material" in enriched_df.columns:
@@ -111,7 +119,7 @@ def _build_resumen_sheet(ws, enriched_df: pd.DataFrame, domains: list[str]) -> N
             .groupby("tipo_material")
             .size()
             .sort_values(ascending=False)
-            .head(15)
+            .head(20)
         )
         for tipo, cnt in tipo_dist.items():
             sections.append((f"  {tipo}", int(cnt)))
@@ -132,7 +140,7 @@ def _build_resumen_sheet(ws, enriched_df: pd.DataFrame, domains: list[str]) -> N
 def _ordered_enriched_cols(df: pd.DataFrame) -> list[str]:
     """Return column order: key info first, then master info, then consumption."""
     priority = [
-        "material_key", "domain", "descripcion_efectiva", "descripcion_fuente",
+        "material_key", "operation", "domain", "descripcion_efectiva", "descripcion_fuente",
         "tipos_posicion", "tipos_imputacion", "is_service", "is_service_d", "is_direct_cost",
         "n_registros", "n_documentos", "grupo_compras", "centro_fuente",
         "in_master", "has_consumption",

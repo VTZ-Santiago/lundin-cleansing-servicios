@@ -57,16 +57,22 @@ _SEC_LABELS = {
     "cruce":    "CRUCE  —  Tipo de Posición  ×  Año de Vencimiento",
     "borrado":  "Indicador de Borrado  (valor dominante por contrato)",
 }
+_POSITION_TYPE_DESCRIPTIONS = {
+    "D": "Servicio / límite de valor",
+    "C": "Consignación",
+    "V": "Valor límite",
+}
+_POSITION_TYPE_ORDER = {
+    "D": 0,
+    "C": 1,
+    "V": 2,
+    "K": 3,
+    "L": 4,
+    "P": 5,
+}
 _SEP_BG    = "D1D5DB"
 _TOTALS_BG = "1E3A5F"
 _GRAY_CELL = "E9ECEF"   # celdas vacías en bloques adicionales
-
-# Bloques adicionales (C, V, VACIO) que se replican bajo el bloque D
-_EXTRA_BLOCKS = [
-    ("C",  "c",    "TIPO C  —  Consignación"),
-    ("V",  "v",    "TIPO V  —  Valor límite"),
-    ("",   "vacio","SIN TIPO  —  Posición sin tipo asignado"),
-]
 
 
 def _fill(hex_bg: str) -> PatternFill:
@@ -108,6 +114,40 @@ def _value_specs(values: list[str], prefix: str, empty_label: str) -> list[tuple
         (value, f"{prefix}_{idx:02d}", empty_label if value == "" else value)
         for idx, value in enumerate(normalized, 1)
     ]
+
+
+def _position_type_sort_key(value: str) -> tuple[int, int, str]:
+    if value == "":
+        return (2, 0, "")
+    if value in _POSITION_TYPE_ORDER:
+        return (0, _POSITION_TYPE_ORDER[value], value)
+    return (1, 0, value)
+
+
+def _position_type_specs(values: list[str]) -> list[tuple[str, str, str, str, str]]:
+    observed = {str(v).strip() for v in values}
+    observed.add("")
+    specs: list[tuple[str, str, str, str, str]] = []
+    for value in sorted(observed, key=_position_type_sort_key):
+        if value == "":
+            specs.append((
+                value,
+                "pos_empty",
+                "Sin tipo asignado",
+                "(position_type vacío)",
+                "SIN TIPO  —  Posición sin tipo asignado",
+            ))
+            continue
+        normalized = re.sub(r"[^0-9A-Za-z]+", "_", value).strip("_").lower() or "type"
+        description = _POSITION_TYPE_DESCRIPTIONS.get(value)
+        specs.append((
+            value,
+            f"pos_{normalized}",
+            f"Tipo {value}",
+            description if description else f"(position_type = '{value}')",
+            f"TIPO {value}" + (f"  —  {description}" if description else ""),
+        ))
+    return specs
 
 
 def _contracts_table(subset: pd.DataFrame, date_column: str = "validity_end") -> pd.DataFrame:
@@ -178,21 +218,23 @@ def _period_stats(
     future_years: list[int],
     date_column: str = "validity_end",
     include_purchase_amount_section: bool = True,
+    position_type_specs: list[tuple[str, str, str, str, str]] | None = None,
     doc_class_specs: list[tuple[str, str, str]] | None = None,
     include_framework_section: bool = False,
     framework_contract_col: str = "framework_contract",
 ) -> dict:
     doc_class_specs = doc_class_specs or []
     c = _contracts_table(subset, date_column=date_column)
+    position_type_specs = position_type_specs or _position_type_specs(
+        c["dom_type"].fillna("").astype(str).str.strip().tolist()
+    )
     stats: dict = {
         "nro_lineas":    len(subset),
         "nro_contratos": len(c),
-        "pos_D":         int((c["dom_type"] == "D").sum()),
-        "pos_C":         int((c["dom_type"] == "C").sum()),
-        "pos_V":         int((c["dom_type"] == "V").sum()),
-        "pos_VACIO":     int((c["dom_type"] == "").sum()),
         "yr_leq2025":    int((c["yr"] <= 2025).sum()),
     }
+    for value, key, *_ in position_type_specs:
+        stats[key] = int((c["dom_type"] == value).sum())
     if include_purchase_amount_section:
         stats["grupos_compra"] = int(c["dom_purchase_group"].nunique())
         stats["monto_total_usd"] = round(float(c["estimated_value_sum"].sum()), 2)
@@ -207,16 +249,10 @@ def _period_stats(
         stats[f"yr_{yr}"] = int((c["yr"] == yr).sum())
     stats["yr_sin_fecha"] = int(c["yr"].isna().sum())
 
-    # Bloque D
-    stats["d_leq2025"] = int(((c["dom_type"] == "D") & (c["yr"] <= 2025)).sum())
-    for yr in future_years:
-        stats[f"d_{yr}"] = int(((c["dom_type"] == "D") & (c["yr"] == yr)).sum())
-
-    # Bloques C, V, VACIO
-    for typ, pfx, _ in _EXTRA_BLOCKS:
-        stats[f"{pfx}_leq2025"] = int(((c["dom_type"] == typ) & (c["yr"] <= 2025)).sum())
+    for value, key, *_ in position_type_specs:
+        stats[f"{key}_leq2025"] = int(((c["dom_type"] == value) & (c["yr"] <= 2025)).sum())
         for yr in future_years:
-            stats[f"{pfx}_{yr}"] = int(((c["dom_type"] == typ) & (c["yr"] == yr)).sum())
+            stats[f"{key}_{yr}"] = int(((c["dom_type"] == value) & (c["yr"] == yr)).sum())
 
     stats["flag_L"]   = int((c["dom_flag"] == "L").sum())
     stats["flag_S"]   = int((c["dom_flag"] == "S").sum())
@@ -263,18 +299,19 @@ def _date_bucket_rows(
     return period_rows + [total]
 
 
-def _remap_cruce(row_data: dict, pfx: str, future_years: list[int]) -> dict:
-    """Return row_data with d_* cruce keys replaced by pfx_* values."""
+def _remap_cruce(row_data: dict, position_type_key: str, future_years: list[int]) -> dict:
+    """Return row_data with generic cruce keys replaced by the requested type bucket."""
     remapped = dict(row_data)
-    remapped["d_leq2025"] = row_data.get(f"{pfx}_leq2025", 0)
+    remapped["cruce_leq2025"] = row_data.get(f"{position_type_key}_leq2025", 0)
     for yr in future_years:
-        remapped[f"d_{yr}"] = row_data.get(f"{pfx}_{yr}", 0)
+        remapped[f"cruce_{yr}"] = row_data.get(f"{position_type_key}_{yr}", 0)
     return remapped
 
 
 def _col_defs(
     future_years: list[int],
     include_purchase_amount_section: bool = True,
+    position_type_specs: list[tuple[str, str, str, str, str]] | None = None,
     doc_class_specs: list[tuple[str, str, str]] | None = None,
     include_framework_section: bool = False,
     date_past_label: str = "Vencidos hasta 2025",
@@ -282,6 +319,7 @@ def _col_defs(
     date_empty_label: str = "Sin fecha de vencimiento",
     date_empty_note: str = "(validity_end vacío)",
 ) -> list[tuple[str, str, str, str]]:
+    position_type_specs = position_type_specs or _position_type_specs(["D", "C", "V", ""])
     doc_class_specs = doc_class_specs or []
     d: list[tuple[str, str, str, str]] = []
 
@@ -316,12 +354,8 @@ def _col_defs(
         ]
         d += [("_sep_1d", "_sep_1d", "", "")]
 
-    d += [
-        ("tipo", "pos_D",     "Tipo D",             "Servicio / límite de valor"),
-        ("tipo", "pos_C",     "Tipo C",             "Consignación"),
-        ("tipo", "pos_V",     "Tipo V",             "Valor límite"),
-        ("tipo", "pos_VACIO", "Sin tipo asignado",  "(position_type vacío)"),
-    ]
+    for _, key, label, note, _ in position_type_specs:
+        d.append(("tipo", key, label, note))
     d += [("_sep_2", "_sep_2", "", "")]
 
     d += [("vigencia", "yr_leq2025", date_past_label,
@@ -332,10 +366,10 @@ def _col_defs(
     d += [("_sep_3", "_sep_3", "", "")]
 
     # Cruce — columnas genéricas (el bloque activo lo indica la fila de etiqueta)
-    d.append(("cruce", "d_leq2025", f"× {date_past_label.replace('hasta', '≤')}",
+    d.append(("cruce", "cruce_leq2025", f"× {date_past_label.replace('hasta', '≤')}",
               "(tipo según bloque — año agrupado)"))
     for yr in future_years:
-        d.append(("cruce", f"d_{yr}", f"× {date_future_label_prefix} {yr}", f"(tipo según bloque — año {yr})"))
+        d.append(("cruce", f"cruce_{yr}", f"× {date_future_label_prefix} {yr}", f"(tipo según bloque — año {yr})"))
     d += [("_sep_4", "_sep_4", "", "")]
 
     d += [
@@ -676,9 +710,12 @@ def generate_stats_report(
         delivery_years = {int(y) for y in delivery_dates.dropna().dt.year.unique() if y >= 2026}
         future_years = sorted(set(future_years) | delivery_years)
 
+    contracts = _contracts_table(df, date_column=date_column)
+    position_type_specs = _position_type_specs(
+        contracts["dom_type"].fillna("").astype(str).str.strip().tolist()
+    )
     doc_class_specs: list[tuple[str, str, str]] = []
     if include_doc_class_section:
-        contracts = _contracts_table(df, date_column=date_column)
         doc_class_specs = _value_specs(
             contracts["dom_doc_class"].fillna("").astype(str).str.strip().tolist(),
             "doc_class",
@@ -697,6 +734,7 @@ def generate_stats_report(
                 future_years,
                 date_column=date_column,
                 include_purchase_amount_section=include_purchase_amount_section,
+                position_type_specs=position_type_specs,
                 doc_class_specs=doc_class_specs,
                 include_framework_section=include_framework_section,
                 framework_contract_col=framework_contract_col,
@@ -709,6 +747,7 @@ def generate_stats_report(
             future_years,
             date_column=date_column,
             include_purchase_amount_section=include_purchase_amount_section,
+            position_type_specs=position_type_specs,
             doc_class_specs=doc_class_specs,
             include_framework_section=include_framework_section,
             framework_contract_col=framework_contract_col,
@@ -738,6 +777,7 @@ def generate_stats_report(
     col_defs = _col_defs(
         future_years,
         include_purchase_amount_section=include_purchase_amount_section,
+        position_type_specs=position_type_specs,
         doc_class_specs=doc_class_specs,
         include_framework_section=include_framework_section,
         date_past_label=date_past_label,
@@ -786,14 +826,18 @@ def generate_stats_report(
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[3].height = 42
 
-    # ── Bloque D (completo, todas las columnas) ──────────────────────────────
-    row_n = 4
-    row_n = _write_block_label(ws, row_n, col_defs, "TIPO D  —  Servicio / límite de valor")
-    row_n = _write_data_rows(ws, all_rows, col_defs, row_n, only_cruce=False)
+    primary_spec = next((spec for spec in position_type_specs if spec[0] != ""), position_type_specs[0])
+    extra_specs = [spec for spec in position_type_specs if spec[1] != primary_spec[1]]
 
-    # ── Bloques C, V, VACIO (sólo cruce — otras columnas en gris) ────────────
+    # ── Bloque principal de tipo (completo, todas las columnas) ─────────────
+    row_n = 4
+    row_n = _write_block_label(ws, row_n, col_defs, primary_spec[4])
+    primary_rows = [_remap_cruce(r, primary_spec[1], future_years) for r in all_rows]
+    row_n = _write_data_rows(ws, primary_rows, col_defs, row_n, only_cruce=False)
+
+    # ── Bloques adicionales (sólo cruce — otras columnas en gris) ───────────
     delivery_overlay_pending = bool(delivery_rows)
-    for typ, pfx, label in _EXTRA_BLOCKS:
+    for _, key, _, _, label in extra_specs:
         # Fila en blanco
         for col_idx in range(1, ncols + 1):
             ws.cell(row=row_n, column=col_idx).fill = _fill("FFFFFF")
@@ -806,7 +850,7 @@ def generate_stats_report(
 
         # Datos con cruce remapeado
         data_start_row = row_n
-        remapped_rows = [_remap_cruce(r, pfx, future_years) for r in all_rows]
+        remapped_rows = [_remap_cruce(r, key, future_years) for r in all_rows]
         row_n = _write_data_rows(ws, remapped_rows, col_defs, row_n, only_cruce=True)
         if delivery_overlay_pending:
             _overlay_section_block_label(ws, label_row, col_defs, "vigencia", delivery_date_label)
@@ -820,7 +864,7 @@ def generate_stats_report(
         elif key == "periodo":
             ws.column_dimensions[get_column_letter(col_idx)].width = 14
         elif key in ("nro_lineas", "nro_contratos", "grupos_compra", "monto_total_usd", "yr_leq2025",
-                     "yr_sin_fecha", "d_leq2025", "flag_sin", "framework_contracts",
+                     "yr_sin_fecha", "cruce_leq2025", "flag_sin", "framework_contracts",
                      "po_with_framework", "po_without_framework", "pct_po_with_framework"):
             ws.column_dimensions[get_column_letter(col_idx)].width = 14
         else:
@@ -833,5 +877,10 @@ def generate_stats_report(
 
     suffix = f"-{file_suffix}" if file_suffix else ""
     path = output_dir / f"reporte_estadistico_{operation}{suffix}.xlsx"
-    wb.save(str(path))
+    try:
+        wb.save(str(path))
+    except PermissionError:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = output_dir / f"reporte_estadistico_{operation}{suffix}_{timestamp}.xlsx"
+        wb.save(str(path))
     return path
