@@ -1,115 +1,135 @@
 groups:
   G1_EXCLUSIONS:
-    name: "Grupo 1 — Primer filtro por vencimiento y tipo"
+    name: "Grupo 1 — Eliminaciones Convenios PDF"
     control_point_out: C2
     rules:
-      - id: R01
-        name: "Fecha de vencimiento en 2025 o antes"
+      - id: C01
+        name: "Eliminar materiales con tipo de planificación ZZ"
         enabled: {MLCC: true}
         priority: 1
         severity: ERROR
         action: EXCLUDE
         config:
-          cutoff_date: "2025-12-31"
-          # Filas con validity_end NaT se conservan (vencimiento desconocido = activo)
-      - id: R02
-        name: "Tipo de contrato/posición distinto de D"
-        enabled: {MLCC: true}
-        priority: 1
-        severity: ERROR
-        action: EXCLUDE
-        config:
-          allowed_position_type: "D"
+          planning_types: [ZZ]
 
   G2_RESCUE:
-    name: "Grupo 2 — Migración segura por saldo pendiente"
+    name: "Grupo 2 — Rescates Convenios"
     control_point_out: C3
-    rules:
-      - id: R03
-        name: "Valores pendientes > 0 en contratos vencidos"
-        enabled: {MLCC: true}
-        priority: 1
-        severity: WARNING
-        action: RESCUE
-        config:
-          column: "pending_planned_qty"
-          cutoff_date: "2025-12-31"
-          allowed_position_type: "D"
-          rescue_exclusion_reasons: [R01]
-          # Rescata solo vencidos por R01, con tipo D y saldo pendiente positivo.
+    rules: []
 
   G3_MARKING:
-    name: "Grupo 3 — Clasificación y marcado"
+    name: "Grupo 3 — Identificación Convenios PDF"
     control_point_out: C3
     rules:
-      - id: R04
-        name: "Valores pendientes < 0 en contratos no vencidos"
+      - id: C02
+        name: "Materiales duplicados dentro del mismo contrato"
         enabled: {MLCC: true}
         priority: 1
         severity: INFO
         action: MARK
+      - id: C03
+        name: "Materiales presentes en más de un contrato vigente"
+        enabled: {MLCC: true}
+        priority: 2
+        severity: INFO
+        action: MARK
         config:
-          column: "pending_planned_qty"
+          active_after: "2025-12-31"
+      - id: C04
+        name: "Ítems sin movimientos en los últimos 24 meses"
+        enabled: {MLCC: true}
+        priority: 3
+        severity: INFO
+        action: MARK
+      - id: C05
+        name: "Diferencia entre descripción del maestro y contrato"
+        enabled: {MLCC: true}
+        priority: 4
+        severity: INFO
+        action: MARK
+      - id: C07
+        name: "Proveedor/material repetido en contratos diferentes"
+        enabled: {MLCC: true}
+        priority: 5
+        severity: INFO
+        action: MARK
+      - id: C09
+        name: "Contratos vencidos con saldo sin consumo"
+        enabled: {MLCC: true}
+        priority: 6
+        severity: INFO
+        action: MARK
+        config:
           cutoff_date: "2025-12-31"
-      - id: R05
-        name: "Contratos que vencen en 2026"
-        enabled: {MLCC: true}
-        priority: 1
+          pending_qty_column: "pending_planned_qty"
+      - id: C06
+        name: "Contratos sin definición de Incoterm"
+        enabled: {MLCC: false}
+        priority: 90
         severity: INFO
         action: MARK
         config:
-          year: 2026
-      - id: M01
-        name: "Clasificación por tipo de posición"
-        enabled: {MLCC: true}
-        priority: 1
+          disabled_reason: "No existe campo Incoterm en los inputs MLCC actuales."
+      - id: C08
+        name: "Contratos próximos a vencer"
+        enabled: {MLCC: false}
+        priority: 91
         severity: INFO
         action: MARK
-      - id: M02
-        name: "Clasificación por indicador de borrado"
-        enabled: {MLCC: true}
-        priority: 1
+        config:
+          disabled_reason: "El PDF deja el período a definir; 4 meses es solo estimación."
+      - id: C10
+        name: "Convenios vigentes no utilizados"
+        enabled: {MLCC: false}
+        priority: 92
         severity: INFO
         action: MARK
+        config:
+          disabled_reason: "No hay campo directo de utilización del convenio; requiere criterio de negocio."
+      - id: C11
+        name: "PIR estándar y Supply Option"
+        enabled: {MLCC: false}
+        priority: 93
+        severity: INFO
+        action: MARK
+        config:
+          disabled_reason: "No existe campo Supply Option y la tarea implica acción SAP posterior."
 
 reporting:
   profiling_summary:
-    - id: R01
-      label: "Fecha de vencimiento"
-      column: "validity_end"
-    - id: R02
-      label: "Tipo de contrato/posición"
-      column: "position_type"
-    - id: R06
-      label: "Monto del contrato"
-      column: "estimated_value"
-    - id: S01
-      label: "Grupo de compras"
-      column: "purchase_group"
+    - id: C01
+      label: "Tipo planificación material"
+      column: "material_planning_type"
+    - id: C04
+      label: "Movimiento 24 meses"
+      column: "material_no_movement_24m"
+    - id: C09
+      label: "Saldo pendiente"
+      column: "pending_planned_qty"
 
 diagram:
-  title: "Lundin — Pipeline Contratos MLCC"
+  title: "Lundin — Pipeline Convenios MLCC (alcance PDF)"
   preamble:
     - id: start
       label: "DATOS\nRECIBIDOS"
       shape: oval
     - id: ingestion
-      label: "INGESTA\nPROFILING\nNORMALIZACIÓN"
+      label: "INGESTA\nMATERIALES\nNORMALIZACIÓN"
       shape: box
     - id: C1
-      label: "CONTRATOS NORMALIZADOS"
+      label: "CONVENIOS\nNORMALIZADOS"
       shape: label
       control_point: C1
   group_output_labels:
-    G1_EXCLUSIONS: "CONTRATOS VIGENTES / TIPO D"
+    G1_EXCLUSIONS: "CONVENIOS SIN ZZ"
   final_outputs:
     - id: C3
-      label: "CONTRATOS MIGRAN\nCLASIFICADOS"
-      edge_label: "Migra"
+      label: "CONVENIOS\nIDENTIFICADOS"
+      edge_label: "Continúa"
       kind: success
       control_point: C3
     - id: C2_NO_MIGRA
-      label: "CONTRATOS NO MIGRAN"
-      edge_label: "No migra"
+      label: "CONVENIOS\nELIMINADOS"
+      edge_label: "Eliminar"
       kind: exclude
       control_point: C2_NO_MIGRA

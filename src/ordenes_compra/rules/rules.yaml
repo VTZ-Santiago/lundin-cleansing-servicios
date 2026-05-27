@@ -1,121 +1,145 @@
 groups:
   G1_EXCLUSIONS:
-    name: "Grupo 1 — Primer filtro PO por vencimiento y tipo"
+    name: "Grupo 1 — Conclusiones OC PDF"
     control_point_out: C2
     rules:
-      - id: R01
-        name: "Fecha de vencimiento en 2025 o antes"
-        enabled: {MLCC: true}
+      - id: P03
+        name: "Concluir OC con más de 6 meses de atraso"
+        enabled: {MLCC: false}
         priority: 1
         severity: ERROR
         action: EXCLUDE
         config:
-          cutoff_date: "2025-12-31"
-      - id: R02
-        name: "Tipo de posición distinto de D"
-        enabled: {MLCC: true}
-        priority: 1
+          disabled_reason: "Requiere validación previa de Lundin y criterio formal de material crítico/spot/convenio."
+      - id: P04
+        name: "Concluir OC de materiales reparados con más de 12 meses de atraso"
+        enabled: {MLCC: false}
+        priority: 2
         severity: ERROR
         action: EXCLUDE
         config:
-          allowed_position_type: "D"
+          disabled_reason: "Requiere validación previa de Lundin y definición confiable de material reparado."
 
   G2_RESCUE:
-    name: "Grupo 2 — Migración segura PO por saldo pendiente"
+    name: "Grupo 2 — Rescates OC"
     control_point_out: C3
-    rules:
-      - id: R03
-        name: "Valores pendientes > 0 en órdenes vencidas"
-        enabled: {MLCC: true}
-        priority: 1
-        severity: WARNING
-        action: RESCUE
-        config:
-          column: "pending_planned_qty"
-          cutoff_date: "2025-12-31"
-          allowed_position_type: "D"
-          rescue_exclusion_reasons: [R01]
+    rules: []
 
   G3_MARKING:
-    name: "Grupo 3 — Clasificación y marcado PO"
+    name: "Grupo 3 — Identificación OC PDF"
     control_point_out: C3
     rules:
-      - id: R04
-        name: "Valores pendientes < 0 en órdenes no vencidas"
+      - id: P01
+        name: "OC con fecha de entrega vencida y saldo pendiente"
         enabled: {MLCC: true}
         priority: 1
         severity: INFO
         action: MARK
         config:
-          column: "pending_planned_qty"
-          cutoff_date: "2025-12-31"
-      - id: R05
-        name: "Órdenes que vencen en 2026"
+          reference_date: "2026-05-25"
+          open_qty_column: "pending_delivery_qty"
+          open_value_column: "pending_delivery_value"
+          purchase_requisition_column: "purchase_requisition"
+          require_purchase_requisition: true
+      - id: P05
+        name: "OC de cargo directo vencidas no entregadas"
         enabled: {MLCC: true}
-        priority: 1
+        priority: 2
         severity: INFO
         action: MARK
         config:
-          year: 2026
-      - id: R06
-        name: "Servicios con cargo directo a centro de costo"
-        enabled: {MLCC: true}
-        priority: 1
-        severity: INFO
-        action: MARK
-        config:
+          reference_date: "2026-05-25"
+          open_qty_column: "pending_delivery_qty"
+          open_value_column: "pending_delivery_value"
           account_assignment_types: [K]
-      - id: M01
-        name: "Clasificación por tipo de posición"
-        enabled: {MLCC: true}
-        priority: 1
+      - id: P02
+        name: "OC pendientes sin definición de Incoterm"
+        enabled: {MLCC: false}
+        priority: 90
         severity: INFO
         action: MARK
-      - id: M02
-        name: "Clasificación por indicador de borrado"
-        enabled: {MLCC: true}
-        priority: 1
+        config:
+          disabled_reason: "No existe campo Incoterm en los inputs MLCC actuales."
+      - id: P06
+        name: "Clasificar cargo directo vencido en Operación/Capex/reparables/garantías"
+        enabled: {MLCC: false}
+        priority: 91
         severity: INFO
         action: MARK
+        config:
+          disabled_reason: "Los inputs no contienen una clasificación confiable para esas categorías."
+      - id: OS01
+        name: "Órdenes de servicio vencidas con saldo"
+        enabled: {MLCC: false}
+        priority: 92
+        severity: INFO
+        action: MARK
+        config:
+          disabled_reason: "No existe dominio de entrada separado para órdenes de servicio."
+      - id: OS02
+        name: "HES pendientes"
+        enabled: {MLCC: false}
+        priority: 93
+        severity: INFO
+        action: MARK
+        config:
+          disabled_reason: "No existe campo/dominio HES en los inputs actuales."
+      - id: PR01
+        name: "PR/SOLPED aprobadas asociadas a necesidades obsoletas"
+        enabled: {MLCC: false}
+        priority: 94
+        severity: INFO
+        action: MARK
+        config:
+          disabled_reason: "No existe dominio de entrada PR/SOLPED; solo referencia de solicitud en algunas OC."
+      - id: RES01
+        name: "Reservas sin utilización"
+        enabled: {MLCC: false}
+        priority: 95
+        severity: INFO
+        action: MARK
+        config:
+          disabled_reason: "No existe dominio de entrada de reservas."
 
 reporting:
   profiling_summary:
-    - id: R01
-      label: "Fecha de vencimiento"
-      column: "validity_end"
-    - id: R02
-      label: "Tipo de posición"
-      column: "position_type"
-    - id: R06
+    - id: P01
+      label: "Fecha de entrega"
+      column: "delivery_date"
+    - id: P01_QTY
+      label: "Cantidad pendiente entrega"
+      column: "pending_delivery_qty"
+    - id: P01_PR
+      label: "Solicitud de pedido"
+      column: "purchase_requisition"
+    - id: P05
       label: "Tipo de imputación"
       column: "account_assignment_type"
-    - id: S01
-      label: "Grupo de compras"
-      column: "purchase_group"
+
 
 diagram:
-  title: "Lundin — Pipeline Órdenes de Compra MLCC"
+  title: "Lundin — Pipeline Órdenes de Compra MLCC (alcance PDF)"
   preamble:
     - id: start
       label: "DATOS\nRECIBIDOS"
       shape: oval
     - id: ingestion
-      label: "INGESTA\nPROFILING\nNORMALIZACIÓN"
+      label: "INGESTA\nMATERIALES\nNORMALIZACIÓN"
       shape: box
     - id: C1
       label: "ÓRDENES DE COMPRA\nNORMALIZADAS"
       shape: label
       control_point: C1
   group_output_labels:
-    G1_EXCLUSIONS: "ÓRDENES VIGENTES / TIPO D"
+    G1_EXCLUSIONS: "OC SIN CONCLUSIONES ACTIVAS"
   final_outputs:
     - id: C3
-      label: "ÓRDENES MIGRAN\nCLASIFICADAS"
-      edge_label: "Migra"
+      label: "OC\nIDENTIFICADAS"
+      edge_label: "Continúa"
       kind: success
       control_point: C3
     - id: C2_NO_MIGRA
-      label: "ÓRDENES NO MIGRAN"
-      edge_label: "No migra"
+      label: "OC\nCONCLUIDAS"
+      edge_label: "Concluir"
       kind: exclude
       control_point: C2_NO_MIGRA

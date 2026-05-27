@@ -60,7 +60,10 @@ class Settings:
         directory = self.input_dir(operation)
         if not directory.exists():
             raise FileNotFoundError(f"Input directory not found: {directory}")
-        files = list(directory.glob("*.XLSX")) + list(directory.glob("*.xlsx"))
+        files = [
+            f for f in list(directory.glob("*.XLSX")) + list(directory.glob("*.xlsx"))
+            if not f.name.startswith("~$")
+        ]
         seen: set[str] = set()
         unique: list[Path] = []
         for f in files:

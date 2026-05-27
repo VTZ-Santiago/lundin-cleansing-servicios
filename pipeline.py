@@ -1,9 +1,12 @@
 import argparse
 import logging
+from datetime import datetime
 
 from src.config.domains import DOMAIN_CONFIGS, get_domain_config
 from src.config.settings import Settings
 from src.ingestion.assembler import DomainAssembler
+from src.lineage.records import FieldLineageRecord, StageManifest
+from src.material_crossref.enrichment import enrich_material_rows, load_reference_tables
 from src.output.control_point import export_control_point
 from src.output.stats_report import generate_stats_report
 from src.profiling.profiler import DataProfiler
@@ -11,7 +14,12 @@ from src.rules.engine import RuleEngine
 from src.utils.logger import setup_logger
 
 
-def run(operation: str, domain: str = "contratos") -> None:
+def run(
+    operation: str,
+    domain: str = "contratos",
+    export_control_points: bool = True,
+    generate_report: bool = True,
+) -> None:
     settings = Settings(domain=domain)
     settings.ensure_dirs()
     domain_cfg = get_domain_config(settings.domain)
@@ -22,7 +30,7 @@ def run(operation: str, domain: str = "contratos") -> None:
     log.info("=" * 60)
 
     # --- 1. Ingestion + schema normalisation ---
-    log.info("[1/4] Ingesta y normalizacion de esquema...")
+    log.info("[1/7] Ingesta y normalizacion de esquema...")
     assembler = DomainAssembler(settings)
     master, lineage, manifests, stats = assembler.build(operation)
 
@@ -43,8 +51,49 @@ def run(operation: str, domain: str = "contratos") -> None:
     log.info("  Columnas: %d total  |  mapped: %d  unmapped: %d  injected: %d",
              len(master.columns), len(lineage.mapped()), len(lineage.unmapped()), len(lineage.injected()))
 
+    # --- 2. Material reference enrichment ---
+    log.info("[2/7] Enriqueciendo materiales con maestro MLCC y consumos...")
+    material_started = datetime.now()
+    rows_before_material = len(master)
+    cols_before_material = len(master.columns)
+    cols_before_set = set(master.columns)
+    material_master, consumptions = load_reference_tables(settings.inputs_dir)
+    master = enrich_material_rows(master, material_master, consumptions)
+    material_cols = [c for c in master.columns if c not in cols_before_set]
+    for col in material_cols:
+        series = master[col]
+        total = max(len(master), 1)
+        lineage.add(FieldLineageRecord(
+            source_file="(material_crossref)",
+            raw_name="",
+            canonical_name=col,
+            mapping_status="INJECTED",
+            null_count=int(series.isna().sum()),
+            null_pct=round(float(series.isna().sum()) / total * 100, 2),
+            unique_count=int(series.nunique(dropna=True)),
+            sample_values=[str(v) for v in series.dropna().unique()[:5].tolist()],
+        ))
+    manifests.append(StageManifest(
+        stage_id="MATERIAL_XREF",
+        label="Cruce maestro materiales y consumos",
+        started_at=material_started,
+        completed_at=datetime.now(),
+        rows_in=rows_before_material,
+        rows_out=len(master),
+        columns_in=cols_before_material,
+        columns_out=len(master.columns),
+        notes=(
+            f"Materiales maestro: {len(material_master):,}. "
+            f"Materiales con consumos: {len(consumptions):,}. "
+            f"Columnas inyectadas: {', '.join(material_cols)}."
+        ),
+    ))
+    in_master = int(master.get("material_in_master", []).sum()) if "material_in_master" in master.columns else 0
+    no_movement = int(master.get("material_no_movement_24m", []).sum()) if "material_no_movement_24m" in master.columns else 0
+    log.info("  Cruce materiales: en maestro=%d  sin movimiento 24m=%d", in_master, no_movement)
+
     # --- 2. Profiling ---
-    log.info("[2/4] Profiling...")
+    log.info("[3/7] Profiling...")
     profiler = DataProfiler()
     profiling, prof_manifest = profiler.profile(master, operation)
     manifests.append(prof_manifest)
@@ -58,24 +107,27 @@ def run(operation: str, domain: str = "contratos") -> None:
         log.info("  Todas las columnas criticas >= 95%% completitud  [OK]")
 
     # --- 3. Export C1 ---
-    log.info("[3/4] Exportando C1...")
-    cp1 = export_control_point(
-        cp_id="C1",
-        description=f"Post-ingesta: {domain_cfg.display_name.lower()} normalizados y perfilados.",
-        operation=operation,
-        df=master,
-        lineage=lineage,
-        profiling=profiling,
-        manifests=list(manifests),
-        issues=[],
-        output_dir=settings.domain_control_points_dir,
-        include_analysis=True,
-        analysis_subject=domain_cfg.display_name,
-    )
-    log.info("  C1 exportado: %s  (%d filas)", cp1.name, len(master))
+    log.info("[4/7] Exportando C1...")
+    if export_control_points:
+        cp1 = export_control_point(
+            cp_id="C1",
+            description=f"Post-ingesta: {domain_cfg.display_name.lower()} normalizados y perfilados.",
+            operation=operation,
+            df=master,
+            lineage=lineage,
+            profiling=profiling,
+            manifests=list(manifests),
+            issues=[],
+            output_dir=settings.domain_control_points_dir,
+            include_analysis=True,
+            analysis_subject=domain_cfg.display_name,
+        )
+        log.info("  C1 exportado: %s  (%d filas)", cp1.name, len(master))
+    else:
+        log.info("  C1 omitido por --skip-control-points  (%d filas)", len(master))
 
     # --- 4. G1 exclusions ---
-    log.info("[4/6] Aplicando reglas G1 (primer filtro por vencimiento y tipo)...")
+    log.info("[5/7] Aplicando reglas G1 (exclusiones de alcance PDF)...")
     engine = RuleEngine(settings)
     df_g1, g1_issues, g1_manifest = engine.apply_group("G1_EXCLUSIONS", master, operation)
     manifests.append(g1_manifest)
@@ -83,10 +135,10 @@ def run(operation: str, domain: str = "contratos") -> None:
     g1_excluded = int((df_g1["exclusion_reason"] != "").sum())
     for issue in g1_issues:
         log.info("  Regla %s (%s): %d filas excluidas", issue.code, issue.message, issue.row_count)
-    log.info("  Excluidos post-G1: %d  |  Candidatos vigentes/tipo D: %d", g1_excluded, len(df_g1) - g1_excluded)
+    log.info("  Excluidos post-G1: %d  |  Continuan: %d", g1_excluded, len(df_g1) - g1_excluded)
 
     # --- 5. G2 rescue ---
-    log.info("[5/6] Aplicando reglas G2 (migracion segura por saldo pendiente)...")
+    log.info("[6/7] Aplicando reglas G2 (rescates configurados)...")
     df_g2, g2_issues, g2_manifest = engine.apply_group("G2_RESCUE", df_g1, operation)
     manifests.append(g2_manifest)
 
@@ -98,60 +150,54 @@ def run(operation: str, domain: str = "contratos") -> None:
     else:
         log.info("  Sin rescates por saldo pendiente positivo en vencidos  [OK]")
 
-    # --- 6. G3 marking (solo sobre migrantes) ---
-    log.info("[6/6] Aplicando reglas G3 (clasificacion y marcado)...")
-    df_migra_pre_g3 = df_g2[df_g2["exclusion_reason"] == ""].copy()
-    df_g3, g3_issues, g3_manifest = engine.apply_group("G3_MARKING", df_migra_pre_g3, operation)
+    # --- 6. G3 marking (universe post-G2) ---
+    log.info("[7/7] Aplicando reglas G3 (identificacion y marcado PDF)...")
+    df_g3, g3_issues, g3_manifest = engine.apply_group("G3_MARKING", df_g2, operation)
     manifests.append(g3_manifest)
 
-    if "mark_position_type" in df_g3.columns:
-        pt_dist = df_g3["mark_position_type"].value_counts().to_dict()
-        log.info("  mark_position_type: %s", "  ".join(f"{k}={v}" for k, v in sorted(pt_dist.items())))
-    if "mark_deletion_flag" in df_g3.columns:
-        df_dist = df_g3["mark_deletion_flag"].value_counts().to_dict()
-        log.info("  mark_deletion_flag: %s", "  ".join(f"{k}={v}" for k, v in sorted(df_dist.items())))
-    if "mark_pending_negative_active" in df_g3.columns:
-        neg_count = int((df_g3["mark_pending_negative_active"] != "").sum())
-        log.info("  mark_pending_negative_active: %d", neg_count)
-    if "mark_validity_2026" in df_g3.columns:
-        validity_2026_count = int((df_g3["mark_validity_2026"] != "").sum())
-        log.info("  mark_validity_2026: %d", validity_2026_count)
-    if "mark_direct_cost_center_service" in df_g3.columns:
-        direct_cost_center_count = int((df_g3["mark_direct_cost_center_service"] != "").sum())
-        log.info("  mark_direct_cost_center_service: %d", direct_cost_center_count)
+    for mark_col in sorted(c for c in df_g3.columns if c.startswith("mark_")):
+        mark_count = int(df_g3[mark_col].fillna("").astype(str).str.strip().ne("").sum())
+        log.info("  %s: %d", mark_col, mark_count)
 
     # --- Final split ---
-    df_no_migra = df_g2[df_g2["exclusion_reason"] != ""].copy()
-    df_migra = df_g3  # migrants: G1 survivors + G2 rescued, marked by G3
+    df_no_migra = df_g3[df_g3["exclusion_reason"] != ""].copy()
+    df_migra = df_g3[df_g3["exclusion_reason"] == ""].copy()
 
     all_issues = g1_issues + g2_issues + g3_issues
 
-    cp2_nm = export_control_point(
-        cp_id="C2_NO_MIGRA",
-        description=f"Post-G1/G2: {domain_cfg.display_name.lower()} excluidos por primer filtro y no rescatados.",
-        operation=operation,
-        df=df_no_migra,
-        lineage=lineage,
-        profiling=profiling,
-        manifests=list(manifests),
-        issues=g1_issues + g2_issues,
-        output_dir=settings.domain_control_points_dir,
-        include_analysis=True,
-        analysis_subject=domain_cfg.display_name,
-    )
-    cp3 = export_control_point(
-        cp_id="C3",
-        description=f"Post-G1/G2/G3: {domain_cfg.display_name.lower()} que migran, con rescates y marcas aplicadas.",
-        operation=operation,
-        df=df_migra,
-        lineage=lineage,
-        profiling=profiling,
-        manifests=list(manifests),
-        issues=all_issues,
-        output_dir=settings.domain_control_points_dir,
-        include_analysis=True,
-        analysis_subject=domain_cfg.display_name,
-    )
+    if export_control_points:
+        cp2_nm = export_control_point(
+            cp_id="C2_NO_MIGRA",
+            description=f"Post-G1/G2: {domain_cfg.display_name.lower()} excluidos por reglas activas y no rescatados.",
+            operation=operation,
+            df=df_no_migra,
+            lineage=lineage,
+            profiling=profiling,
+            manifests=list(manifests),
+            issues=g1_issues + g2_issues,
+            output_dir=settings.domain_control_points_dir,
+            include_analysis=True,
+            analysis_subject=domain_cfg.display_name,
+        )
+        cp3 = export_control_point(
+            cp_id="C3",
+            description=f"Post-G1/G2/G3: {domain_cfg.display_name.lower()} que continúan, con marcas PDF aplicadas.",
+            operation=operation,
+            df=df_migra,
+            lineage=lineage,
+            profiling=profiling,
+            manifests=list(manifests),
+            issues=all_issues,
+            output_dir=settings.domain_control_points_dir,
+            include_analysis=True,
+            analysis_subject=domain_cfg.display_name,
+        )
+        cp2_name = cp2_nm.name
+        cp3_name = cp3.name
+    else:
+        cp2_name = "(omitido por --skip-control-points)"
+        cp3_name = "(omitido por --skip-control-points)"
+        log.info("  Control points finales omitidos por --skip-control-points")
 
     # --- Summary ---
     reconciliation_ok = len(master) == len(df_no_migra) + len(df_migra)
@@ -160,9 +206,9 @@ def run(operation: str, domain: str = "contratos") -> None:
     log.info("RESUMEN  |  operacion: %s", operation)
     log.info("=" * 60)
     log.info("  C1  (normalizados):       %6d", len(master))
-    log.info("  C2_NO_MIGRA (excluidos):  %6d  ->  %s", len(df_no_migra), cp2_nm.name)
+    log.info("  C2_NO_MIGRA (excluidos):  %6d  ->  %s", len(df_no_migra), cp2_name)
     log.info("    (rescatados por G2:     %6d)", rescued_count)
-    log.info("  C3  (migran):             %6d  ->  %s", len(df_migra), cp3.name)
+    log.info("  C3  (migran):             %6d  ->  %s", len(df_migra), cp3_name)
     if reconciliation_ok:
         log.info("  Reconciliacion C1 == C2_NO_MIGRA + C3:  OK")
     else:
@@ -178,17 +224,20 @@ def run(operation: str, domain: str = "contratos") -> None:
 
     # --- Reporte estadístico independiente (C1 — universo pre-reglas) ---
     is_purchase_order_domain = domain_cfg.package_name == "ordenes_compra"
-    rpt = generate_stats_report(
-        master, operation, settings.domain_outputs_dir,
-        dataset_label=f"Universo Completo — C1 (pre-reglas, {len(master):,} filas)",
-        entity_label=domain_cfg.display_name,
-        file_suffix=domain_cfg.report_suffix,
-        include_delivery_date_section=is_purchase_order_domain,
-        include_purchase_amount_section=not is_purchase_order_domain,
-        include_doc_class_section=is_purchase_order_domain,
-        include_framework_section=is_purchase_order_domain,
-    )
-    log.info("  Reporte estadistico:      %s", rpt.name)
+    if generate_report:
+        rpt = generate_stats_report(
+            master, operation, settings.domain_outputs_dir,
+            dataset_label=f"Universo Completo — C1 (pre-reglas, {len(master):,} filas)",
+            entity_label=domain_cfg.display_name,
+            file_suffix=domain_cfg.report_suffix,
+            include_delivery_date_section=is_purchase_order_domain,
+            include_purchase_amount_section=not is_purchase_order_domain,
+            include_doc_class_section=is_purchase_order_domain,
+            include_framework_section=is_purchase_order_domain,
+        )
+        log.info("  Reporte estadistico:      %s", rpt.name)
+    else:
+        log.info("  Reporte estadistico omitido por --skip-stats-report")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -215,9 +264,24 @@ def _parse_args() -> argparse.Namespace:
         choices=["MLCC"],
         help="Operacion a procesar (default: MLCC)",
     )
+    parser.add_argument(
+        "--skip-control-points",
+        action="store_true",
+        help="Ejecuta reglas y reconciliacion sin escribir workbooks de control point.",
+    )
+    parser.add_argument(
+        "--skip-stats-report",
+        action="store_true",
+        help="Omite el reporte estadistico independiente.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    run(args.operation, args.domain)
+    run(
+        args.operation,
+        args.domain,
+        export_control_points=not args.skip_control_points,
+        generate_report=not args.skip_stats_report,
+    )

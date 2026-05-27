@@ -44,10 +44,14 @@ def _read_source_file(path: Path) -> pd.DataFrame:
     return df
 
 
-def _normalize_material_key(series: pd.Series) -> pd.Series:
+def normalize_material_key(series: pd.Series) -> pd.Series:
     """Float or str material → clean integer string key (e.g. '32001085')."""
     numeric = pd.to_numeric(series, errors="coerce")
     return numeric.apply(lambda v: str(int(v)) if pd.notna(v) else None)
+
+
+def _normalize_material_key(series: pd.Series) -> pd.Series:
+    return normalize_material_key(series)
 
 
 def extract_source_materials(domain: str, inputs_root: Path) -> pd.DataFrame:
@@ -57,7 +61,10 @@ def extract_source_materials(domain: str, inputs_root: Path) -> pd.DataFrame:
         raise ValueError(f"Unknown domain: {domain}")
 
     source_dir = inputs_root / "MLCC" / cfg.input_subdir
-    files = sorted(source_dir.glob("*.XLSX")) + sorted(source_dir.glob("*.xlsx"))
+    files = [
+        f for f in sorted(source_dir.glob("*.XLSX")) + sorted(source_dir.glob("*.xlsx"))
+        if not f.name.startswith("~$")
+    ]
     if not files:
         raise FileNotFoundError(f"No Excel files found in {source_dir}")
 

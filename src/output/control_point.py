@@ -256,6 +256,11 @@ def _write_master(wb: Workbook, df: pd.DataFrame) -> None:
             show_cols.append(aux)
     mark_cols = sorted(c for c in df.columns if c.startswith("mark_"))
     show_cols.extend(mark_cols)
+    material_cols = sorted(
+        c for c in df.columns
+        if (c == "material_key" or c.startswith("material_")) and c not in show_cols
+    )
+    show_cols.extend(material_cols)
 
     df_display = df[show_cols].copy()
     _write_header_row(ws, show_cols)

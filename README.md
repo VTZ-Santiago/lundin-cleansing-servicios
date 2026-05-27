@@ -1,151 +1,140 @@
 # lundin-cleansing-servicios
 
-Pipeline de limpieza y estandarización de datos de **contratos** y **órdenes de compra** para MLCC.
+Pipeline de limpieza, identificación y control de datos para **convenios/contratos** y **órdenes de compra** MLCC.
 
-Basado en la arquitectura de `lundin-cleansing-all-rules`, adaptado al dominio de contratos.
+La rama `all-rules` ajusta las reglas al alcance descrito en `resources/Aumento alcance servicio Data cleansing vf2.pdf`. El alcance activo se limita a los dominios con inputs disponibles en este repositorio:
 
----
+- `contratos`: convenios/contratos SAP en `inputs/MLCC/contratos`.
+- `ordenes-compra`: órdenes de compra de material catalogado y cargo directo en `inputs/MLCC/ordenes-compra`.
 
-## Dominios soportados
+Los puntos del PDF sobre órdenes de servicio, HES, PR/SOLPED y reservas quedan documentados como alcance no activo porque no existe un dominio de entrada separado para esos paquetes de datos.
 
-- `contratos`: usa los archivos en [inputs/MLCC/contratos](inputs/MLCC/contratos) y conserva el flujo de reglas original de contratos.
-- `ordenes-compra`: usa los archivos en [inputs/MLCC/ordenes-compra](inputs/MLCC/ordenes-compra) y aplica reglas equivalentes para PO, incluyendo una marca adicional para cargos directos a centro de costo vía `Tipo de imputación`.
+## Dependencia crítica: cruce de materiales
 
-Los paquetes Python asociados son [src/contratos](src/contratos) y [src/ordenes_compra](src/ordenes_compra). El selector operativo es `--domain contratos|ordenes-compra`.
+Las reglas actuales dependen del maestro de materiales y consumos históricos:
+
+- `inputs/MLCC/MLCC - Análisis Completo.xlsx`
+- `inputs/MLCC/MLCC - Consumos Históricos Marzo 2026.xlsx`
+
+El pipeline cruza cada fila normalizada contra esos archivos antes de ejecutar reglas. El enriquecimiento inyecta columnas como `material_key`, `material_planning_type`, `material_in_master`, `material_no_movement_24m`, `material_is_critical`, `material_master_description`, `material_frequency_24m` y totales de consumo.
+
+El módulo standalone `src/material_crossref` sigue disponible para generar el reporte de cobertura de materiales.
 
 ## Flujo del pipeline
 
 ```
-DATOS RECIBIDOS (4 archivos Excel MLCC)
+DATOS RECIBIDOS
         ↓
-INGESTA + NORMALIZACIÓN + PROFILING
+INGESTA + NORMALIZACIÓN
         ↓
-[C1] DATOS NORMALIZADOS
+CRUCE MAESTRO MATERIALES + CONSUMOS
         ↓
-G1 — Primer filtro (R01: vencimiento, R02: tipo contrato/posición)
+[C1] DATOS NORMALIZADOS Y ENRIQUECIDOS
         ↓
-G2 — Migración segura (R03: vencidos con saldo pendiente positivo)
+G1 — Eliminaciones/conclusiones activas
         ↓
-G3 — Clasificación y marcado (R04/R05 + marcas técnicas + regla PO de imputación)
-        ↓                        ↓
-[C3] REGISTROS MIGRAN     [C2_NO_MIGRA] REGISTROS NO MIGRAN
+G2 — Rescates configurados
+        ↓
+G3 — Identificación y marcado PDF
+        ↓                         ↓
+[C3] REGISTROS CONTINÚAN   [C2_NO_MIGRA] REGISTROS ELIMINADOS/CONCLUIDOS
 ```
 
-**Invariante de reconciliación:** `C1 = C3 + C2_NO_MIGRA`
+**Invariante de reconciliación:** `C1 = C3 + C2_NO_MIGRA`.
 
-Para la segmentación por vigencia del flujo, la fecha efectiva usa `validity_end` (← `Fin período validez`) y, cuando viene vacía, cae en `delivery_date` (← `Fecha de entrega`).
+G3 se aplica sobre todo el universo post-G2, no solo sobre registros que continúan. Esto permite auditar marcas en `C2_NO_MIGRA` cuando existan exclusiones activas.
 
----
+## Reglas activas: contratos / convenios
 
-## Estructura
+| ID | Acción | Regla PDF | Implementación |
+|---|---|---|---|
+| C01 | EXCLUDE | Eliminar materiales cuyo tipo de planificación corresponda a `ZZ` | Usa `material_planning_type` desde el maestro de materiales. |
+| C02 | MARK | Identificar materiales duplicados dentro del mismo contrato | Marca filas donde `(purchase_document, material_key)` aparece más de una vez. |
+| C03 | MARK | Detectar materiales presentes en más de un contrato vigente | Considera vigente si la fecha efectiva es posterior a `2025-12-31` o está vacía. |
+| C04 | MARK | Identificar ítems sin movimientos en los últimos 24 meses | Usa `material_frequency_24m <= 0` desde el maestro. |
+| C05 | MARK | Identificar diferencias entre descripción del maestro y contrato | Compara `short_text` con `material_master_description` normalizado. |
+| C07 | MARK | Identificar proveedor/material repetido en contratos diferentes | Marca pares `(material_key, vendor)` presentes en más de un contrato. |
+| C09 | MARK | Identificar contratos vencidos con saldo sin consumo | Fecha efectiva `<= 2025-12-31`, saldo pendiente positivo y sin movimiento 24m. |
+
+## Reglas activas: órdenes de compra
+
+| ID | Acción | Regla PDF | Implementación |
+|---|---|---|---|
+| P01 | MARK | Identificar OC con fechas de entrega vencidas provenientes de PR | Marca `delivery_date < 2026-05-25`, cantidad/valor pendiente por entregar y `purchase_requisition` no vacío. |
+| P05 | MARK | Identificar OC de cargo directo con entrega vencida no entregada | Marca fecha vencida con saldo pendiente y `account_assignment_type == K`. |
+
+## Reglas desactivadas o fuera de alcance
+
+| ID / tema | Dominio | Motivo |
+|---|---|---|
+| C06 / P02 Incoterm | contratos / órdenes | Los inputs MLCC actuales no traen campo Incoterm. |
+| C08 contratos próximos a vencer | contratos | El PDF deja el período a definir; 4 meses es una estimación, no un criterio cerrado. |
+| C10 convenios vigentes no utilizados | contratos | No hay campo directo de utilización de convenio; requiere criterio de negocio. |
+| C11 PIR estándar y Supply Option | contratos | No existe campo Supply Option y la tarea implica acción SAP posterior. |
+| P03 concluir OC con más de 6 meses de atraso | órdenes | Requiere validación previa de Lundin y criterio formal para excluir materiales críticos. |
+| P04 concluir OC de materiales reparados con más de 12 meses | órdenes | Requiere validación previa de Lundin y definición confiable de material reparado. |
+| P06 clasificar cargo directo en Operación/Capex/reparables/garantías | órdenes | Los inputs no contienen una clasificación confiable para esas categorías. |
+| Órdenes de servicio / HES | no activo | No existe dominio de entrada separado. |
+| PR/SOLPED | no activo | No existe dominio de entrada PR/SOLPED; las referencias disponibles en OC se usan solo para P01. |
+| Reservas | no activo | No existe dominio de entrada de reservas. |
+
+Las reglas desactivadas quedan en los YAML con `enabled: {MLCC: false}` cuando pertenecen a un dominio existente. No se importan ni se ejecutan.
+
+## Estructura relevante
 
 ```
 lundin-cleansing-servicios/
-├── pipeline.py             # Punto de entrada
-├── generate_diagram.py     # Genera diagrama SVG
-├── requirements.txt
+├── pipeline.py
+├── run_material_crossref.py
 ├── src/
-│   ├── config/settings.py          # Paths y configuración
-│   ├── schema/canonical.py         # Esquema canónico (29 columnas + 2 auxiliares)
-│   ├── schema/field_map_mlcc.py    # Mapeo de headers español → canónico
-│   ├── ingestion/assembler.py      # Carga y normalización de archivos Excel
-│   ├── contratos/                  # Dominio contratos: reglas y mapping MLCC
-│   ├── ordenes_compra/             # Dominio órdenes de compra: reglas y mapping MLCC
-│   ├── rules/engine.py             # Motor de reglas (carga dinámica por dominio)
-│   ├── profiling/profiler.py       # Estadísticas por columna
-│   ├── output/control_point.py     # Exportación de puntos de control (Excel)
-│   ├── output/stats_report.py      # Reporte estadístico independiente
-│   ├── diagram/flowchart.py        # Generación de diagrama SVG
-│   └── lineage/                    # Trazabilidad de columnas
-├── inputs/MLCC/                    # Archivos Excel de entrada (gitignored)
-└── outputs/control_points/         # Resultados del pipeline
+│   ├── contratos/rules/              # Reglas de convenios
+│   ├── ordenes_compra/rules/         # Reglas de órdenes de compra
+│   ├── material_crossref/            # Cruce maestro materiales + consumos
+│   ├── schema/                       # Esquema canónico y mapping MLCC
+│   ├── ingestion/assembler.py
+│   ├── output/control_point.py
+│   └── output/stats_report.py
+├── inputs/MLCC/                      # Archivos Excel de entrada (gitignored)
+└── outputs/                          # Control points y reportes (gitignored)
 ```
-
----
-
-## Setup
-
-```powershell
-# Crear entorno virtual (si no existe)
-python -m venv venv
-
-# Instalar dependencias
-venv\Scripts\python.exe -m pip install -r requirements.txt
-
-# (Opcional) Para generar el diagrama como imagen renderizada:
-winget install graphviz
-```
-
----
 
 ## Uso
 
 ```powershell
-# Ejecutar pipeline completo para contratos
-venv\Scripts\python.exe pipeline.py
-
-# Contratos explícito
+# Contratos / convenios
 venv\Scripts\python.exe pipeline.py --domain contratos --operation MLCC
 
 # Órdenes de compra
 venv\Scripts\python.exe pipeline.py --domain ordenes-compra --operation MLCC
 
-# Generar diagrama SVG para contratos
-venv\Scripts\python.exe generate_diagram.py --domain contratos
+# Verificación rápida de órdenes sin escribir workbooks pesados
+venv\Scripts\python.exe pipeline.py --domain ordenes-compra --operation MLCC --skip-control-points --skip-stats-report
 
-# Generar diagrama PNG para órdenes de compra
+# Reporte standalone de cruce de materiales
+venv\Scripts\python.exe run_material_crossref.py --domain ambos
+
+# Verificación rápida de sintaxis
+venv\Scripts\python.exe -m compileall src pipeline.py generate_diagram.py run_material_crossref.py
+
+# Diagramas
+venv\Scripts\python.exe generate_diagram.py --domain contratos --format png
 venv\Scripts\python.exe generate_diagram.py --domain ordenes-compra --format png
-
-# Verificar compilación rápida
-venv\Scripts\python.exe -m compileall src pipeline.py generate_diagram.py
 ```
 
----
+Si un reporte estadístico está abierto en Excel y Windows bloquea el archivo destino, el pipeline escribe una copia con timestamp para no detener la ejecución.
 
-## Puntos de control (outputs)
+Para validaciones de reglas sobre dominios grandes se pueden usar `--skip-control-points` y `--skip-stats-report`. Esos flags no cambian la lógica de reglas ni la reconciliación; solo omiten escrituras pesadas de salida.
+
+## Outputs principales
 
 | Ruta | Descripción |
 |---|---|
-| `outputs/contratos/control_points/C1_MLCC.xlsx` | Post-ingesta contratos |
-| `outputs/contratos/control_points/C2_NO_MIGRA_MLCC.xlsx` | Contratos no migran |
-| `outputs/contratos/control_points/C3_MLCC.xlsx` | Contratos migran |
-| `outputs/contratos/reporte_estadistico_MLCC-contratos.xlsx` | Resumen estadístico contratos |
-| `outputs/ordenes_compra/control_points/C1_MLCC.xlsx` | Post-ingesta órdenes de compra |
-| `outputs/ordenes_compra/control_points/C2_NO_MIGRA_MLCC.xlsx` | Órdenes no migran |
-| `outputs/ordenes_compra/control_points/C3_MLCC.xlsx` | Órdenes migran |
-| `outputs/ordenes_compra/reporte_estadistico_MLCC-PO.xlsx` | Resumen estadístico órdenes de compra, con clasificación por documento y contrato marco |
+| `outputs/contratos/control_points/C1_MLCC.xlsx` | Convenios normalizados y enriquecidos con materiales. |
+| `outputs/contratos/control_points/C2_NO_MIGRA_MLCC.xlsx` | Convenios eliminados por reglas EXCLUDE activas. |
+| `outputs/contratos/control_points/C3_MLCC.xlsx` | Convenios que continúan, con marcas PDF. |
+| `outputs/ordenes_compra/control_points/C1_MLCC.xlsx` | Órdenes normalizadas y enriquecidas con materiales. |
+| `outputs/ordenes_compra/control_points/C2_NO_MIGRA_MLCC.xlsx` | Órdenes concluidas por reglas EXCLUDE activas. |
+| `outputs/ordenes_compra/control_points/C3_MLCC.xlsx` | Órdenes que continúan, con marcas PDF. |
+| `outputs/material_crossref/reporte_materiales_*.xlsx` | Reporte standalone de cobertura de materiales. |
 
-Cada archivo tiene hojas: **Info**, **Master**, **Field Map**, **Issues**, **Stages**, **Profiling**. Los diagramas se generan por dominio en `outputs/<dominio>/diagrama_pipeline.*`.
-
-El reporte estadístico de contratos conserva volumen, grupo de compras, monto, tipo de posición, vigencia y borrado. El reporte estadístico de PO reemplaza el bloque de grupo/monto por clasificación `Cl.documento compras`, conserva la vigencia por validez, agrega un bloque adicional por `Fecha de entrega`, incluye resumen de `Contrato marco` y una hoja adicional `Contrato Marco` con el conteo de PO asociadas a cada contrato marco.
-
----
-
-## Reglas activas
-
-| ID | Nombre | Dominio | Grupo | Acción |
-|---|---|---|---|
-| R01 | Fecha de vencimiento en 2025 o antes | contratos / ordenes-compra | G1_EXCLUSIONS | EXCLUDE |
-| R02 | Tipo de posición distinto de D | contratos / ordenes-compra | G1_EXCLUSIONS | EXCLUDE |
-| R03 | Valores pendientes > 0 en registros vencidos | contratos / ordenes-compra | G2_RESCUE | RESCUE |
-| R04 | Valores pendientes < 0 en registros no vencidos | contratos / ordenes-compra | G3_MARKING | MARK |
-| R05 | Registros que vencen en 2026 | contratos / ordenes-compra | G3_MARKING | MARK |
-| R06 | Servicios con cargo directo a centro de costo (`K`) | ordenes-compra | G3_MARKING | MARK |
-| M01 | Clasificación por tipo de posición | contratos / ordenes-compra | G3_MARKING | MARK |
-| M02 | Clasificación por indicador de borrado | contratos / ordenes-compra | G3_MARKING | MARK |
-
-Configuración por dominio en [src/contratos/rules/rules.yaml](src/contratos/rules/rules.yaml) y [src/ordenes_compra/rules/rules.yaml](src/ordenes_compra/rules/rules.yaml). Para agregar una nueva regla:
-1. Crear el módulo en el dominio correspondiente, por ejemplo `src/ordenes_compra/rules/group3/rNN.py`
-2. Añadir la entrada en el `rules.yaml` del dominio con `enabled`, `priority`, `action` y `config`
-
----
-
-## Esquema canónico
-
-El pipeline normaliza los 29 headers en español a nombres canónicos en inglés.
-La fecha clave para las reglas de vigencia es `validity_end` (← `Fin período validez`), con fallback a `delivery_date` (← `Fecha de entrega`) cuando el primer campo viene vacío.
-
-Grain key de MLCC: (`purchase_document`, `position`)
-
-Las 81 columnas extra del archivo 2025-2026 se preservan con prefijo `_raw__`
-(NaN en filas de archivos anteriores).
+Cada control point incluye hojas **Info**, **Master**, **Field Map**, **Issues**, **Stages** y **Profiling**. La hoja **Master** muestra columnas canónicas, columnas `mark_*` y columnas `material_*` inyectadas por el cruce.

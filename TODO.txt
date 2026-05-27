@@ -1,30 +1,21 @@
 # Pendientes
 
-## Split por dominio
-El pipeline ya soporta `contratos` y `ordenes-compra` con `--domain`, `inputs/MLCC/<dominio>/`
-y outputs separados en `outputs/<dominio>/`. Pendiente opcional: retirar compatibilidad antigua en
-`src/rules/` y centralizar totalmente los wrappers/implementaciones en los paquetes de dominio.
+## Reglas PDF desactivadas por falta de datos o criterio
 
-## Deduplicación a nivel contrato (posterior a todas las reglas)
-El pipeline opera sobre filas (posiciones SAP). La reducción a contratos únicos, reteniendo
-la fecha de vencimiento más reciente, queda pendiente como etapa final del flujo.
+- Incoterm en contratos y OC: activar solo si los inputs incorporan un campo Incoterm confiable.
+- Contratos próximos a vencer: definir fecha de migración y ventana formal; el PDF menciona 4 meses como estimación.
+- Convenios vigentes no utilizados: definir criterio operacional de "utilización" y fuente de datos.
+- PIR estándar / Supply Option: incorporar fuente con campo Supply Option y definir si el pipeline solo identifica o también prepara acción SAP.
+- Concluir OC con más de 6 meses de atraso: requiere validación de Lundin, criterio de compras spot/bajo convenio y exclusión de materiales críticos.
+- Concluir OC reparables con más de 12 meses de atraso: requiere definición confiable de material reparado.
+- Cargo directo vencido por categoría Operación/Capex/reparables/garantías: falta fuente o regla de clasificación.
 
-Criterio de conflicto a aplicar:
-  "migra" tiene prioridad sobre "no migra". Si un contrato tiene al menos una posición
-  que migra (exclusion_reason == ""), el contrato completo debe ir a migra y desaparecer
-  de C_NO_MIGRA.
+## Dominios del PDF sin input actual
 
-## Prioridad entre EXCLUDE y RESCUE
-La regla R03 de migración segura solo rescata exclusiones R01, con tipo D y
-pending_planned_qty > 0. No revoca exclusiones por tipo de contrato/posición.
+- Órdenes de servicio y HES pendientes.
+- PR/SOLPED aprobadas asociadas a necesidades obsoletas.
+- Reservas sin utilización.
 
-Pendiente solo si aparecen rescates futuros: formalizar una matriz configurable para declarar
-qué reglas RESCUE pueden revocar qué reglas EXCLUDE.
+## Mejora opcional
 
-## Reglas PO
-La primera versión de `ordenes-compra` reutiliza la taxonomía G1/G2/G3 y agrega una marca
-para `account_assignment_type == K` como proxy de cargo directo a centro de costo.
-
-Pendiente de negocio: confirmar si la exclusión por tipo de posición en PO debe usar siempre
-la semántica descriptiva de `Tipo de posición.1` (`D/C/V/L/P`) o si hay códigos numéricos
-adicionales de `Tipo de posición` que deban considerarse equivalentes a servicio.
+- Si se agregan nuevos dominios, crear paquetes `src/<dominio>/rules` y configs separados en vez de mezclar esos alcances dentro de OC.
