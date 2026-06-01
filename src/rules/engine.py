@@ -20,6 +20,11 @@ _GROUP_MODULE_PREFIX_BY_DOMAIN: dict[str, dict[str, str]] = {
         "G2_RESCUE":     "src.ordenes_compra.rules.group2",
         "G3_MARKING":    "src.ordenes_compra.rules.group3",
     },
+    "segmentacion": {
+        "G1_EXCLUSIONS": "src.segmentacion.rules.group1",
+        "G2_RESCUE":     "src.segmentacion.rules.group2",
+        "G3_MARKING":    "src.segmentacion.rules.group3",
+    },
 }
 
 

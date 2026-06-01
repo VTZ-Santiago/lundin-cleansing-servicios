@@ -246,8 +246,20 @@ def _write_info(wb: Workbook, cp_id: str, description: str, operation: str,
             ws.column_dimensions[get_column_letter(col_cells[0].column)].width = width
 
 
-def _write_master(wb: Workbook, df: pd.DataFrame) -> None:
+def _write_master(wb: Workbook, df: pd.DataFrame, master_columns: list[str] | None = None) -> None:
     ws = wb.create_sheet("Master")
+
+    if master_columns is not None:
+        show_cols = [column for column in master_columns if column in df.columns]
+        df_display = df[show_cols].copy()
+        _write_header_row(ws, show_cols)
+        ws.freeze_panes = "A2"
+
+        for row_data in _df_to_rows(df_display):
+            ws.append(row_data)
+
+        _autofit(ws)
+        return
 
     # Columns to show: canonical order + annotations if present
     show_cols = [c for c in CANONICAL_NAMES if c in df.columns]
@@ -424,6 +436,7 @@ def export_control_point(
     output_dir: Path,
     include_analysis: bool = False,
     analysis_subject: str = "Contratos",
+    master_columns: list[str] | None = None,
 ) -> Path:
     path = output_dir / f"{cp_id}_{operation}.xlsx"
     wb = Workbook()
@@ -434,7 +447,7 @@ def export_control_point(
     _write_info(wb, cp_id, description, operation, df, issues, manifests,
                 analysis_rows=analysis_rows, analysis_years=analysis_years,
                 analysis_subject=analysis_subject)
-    _write_master(wb, df)
+    _write_master(wb, df, master_columns=master_columns)
     _write_field_map(wb, lineage)
     _write_issues(wb, issues)
     _write_stages(wb, manifests)

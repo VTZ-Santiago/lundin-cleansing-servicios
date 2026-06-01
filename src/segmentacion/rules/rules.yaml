@@ -1,0 +1,66 @@
+groups:
+  G1_EXCLUSIONS:
+    name: "Grupo 1 — Exclusiones comunes de migración"
+    control_point_out: C2
+    rules:
+      - id: E01
+        name: "Excluir registros cerrados o vencidos hasta junio 2026 sin saldo por entregar"
+        enabled: {MLCC: true}
+        priority: 1
+        severity: ERROR
+        action: EXCLUDE
+        config:
+          cutoff_date: "2026-06-30"
+          primary_date_column: "delivery_date"
+          fallback_date_column: "validity_end"
+          pending_qty_column: "pending_delivery_qty"
+          pending_value_column: "pending_delivery_value"
+
+  G2_RESCUE:
+    name: "Grupo 2 — Rescates segmentación"
+    control_point_out: C2
+    rules: []
+
+  G3_MARKING:
+    name: "Grupo 3 — Marcas segmentación"
+    control_point_out: C2
+    rules: []
+
+reporting:
+  profiling_summary:
+    - id: E01_DATE
+      label: "Fecha efectiva entrega/vencimiento"
+      column: "delivery_date"
+    - id: E01_QTY
+      label: "Cantidad por entregar"
+      column: "pending_delivery_qty"
+    - id: E01_VALUE
+      label: "Valor por entregar"
+      column: "pending_delivery_value"
+
+diagram:
+  title: "Lundin — Segmentación MLCC desde Órdenes de Compra"
+  preamble:
+    - id: start
+      label: "OC TODOS\nLOS PERIODOS"
+      shape: oval
+    - id: segmentation
+      label: "SEGMENTACIÓN\nCONTRATOS / OS"
+      shape: box
+    - id: C1
+      label: "SEGMENTOS\nC1"
+      shape: label
+      control_point: C1
+  group_output_labels:
+    G1_EXCLUSIONS: "SEGMENTOS MIGRABLES"
+  final_outputs:
+    - id: C2
+      label: "C2\nMIGRA"
+      edge_label: "Migra"
+      kind: success
+      control_point: C2
+    - id: C2_NO_MIGRA
+      label: "C2\nNO MIGRA"
+      edge_label: "No migra"
+      kind: exclude
+      control_point: C2_NO_MIGRA
