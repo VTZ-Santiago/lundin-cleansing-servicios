@@ -20,19 +20,19 @@ OUTPUT_HEADERS: list[str] = [
     "Texto Breve",
     "Tipo de Posición",
     "Cl Docto compras",
+    "Grupo de liberación",
     "Por entregar (cantidad)",
     "Por entregar (valor)",
     "Fecha documento",
     "Fecha de Entrega",
     "Fecha de Termino",
+    "Indicador de borrado",
 ]
 
 DATE_HEADERS = ["Fecha documento", "Fecha de Entrega", "Fecha de Termino"]
 ID_HEADERS = ["PR/SOLPED", "Contrato Marco", "Documento compras", "Posición", "Material"]
 NUMERIC_HEADERS = ["Por entregar (cantidad)", "Por entregar (valor)"]
 REQUIRED_HEADERS = ["Documento compras", "Posición"]
-DATE_CUTOFF = pd.Timestamp("2025-01-01")
-
 RAW_TO_OUTPUT: dict[str, str] = {
     "centro": "Planta",
     "plant": "Planta",
@@ -56,6 +56,9 @@ RAW_TO_OUTPUT: dict[str, str] = {
     "cl.documento compras": "Cl Docto compras",
     "purchasing doc. type": "Cl Docto compras",
     "purch. doc. category": "Cl Docto compras",
+    "grupo de liberación": "Grupo de liberación",
+    "grupo de liberacion": "Grupo de liberación",
+    "release group": "Grupo de liberación",
     "por entregar (cantidad)": "Por entregar (cantidad)",
     "still to be delivered (qty)": "Por entregar (cantidad)",
     "por entregar (valor)": "Por entregar (valor)",
@@ -67,6 +70,9 @@ RAW_TO_OUTPUT: dict[str, str] = {
     "delivery date": "Fecha de Entrega",
     "fin periodo validez": "Fecha de Termino",
     "validity period end": "Fecha de Termino",
+    "indicador de borrado": "Indicador de borrado",
+    "deletion flag": "Indicador de borrado",
+    "deletion indicator": "Indicador de borrado",
 }
 
 RAW_HEADER_PRIORITY: dict[str, int] = {
@@ -237,9 +243,7 @@ def _clean_output_row(raw_values: dict[str, object], last_purchase_document: obj
 
 
 def _qualifies_for_output(row: dict[str, object]) -> bool:
-    if any(row[header] is None for header in REQUIRED_HEADERS):
-        return False
-    return bool(row["Fecha de Entrega"] >= DATE_CUTOFF)
+    return not any(row[header] is None for header in REQUIRED_HEADERS)
 
 
 def _missing_headers(selected_columns: dict[str, tuple[int, object]]) -> list[str]:
