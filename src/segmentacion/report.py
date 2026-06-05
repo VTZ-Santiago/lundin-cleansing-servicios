@@ -12,6 +12,11 @@ class SegmentSummary:
     label: str
     c1_rows: int
     c1_documents: int
+    c2_documents: int
+    c2_no_migra_documents: int
+    c1_outline_contracts: int
+    c2_outline_contracts: int
+    c2_no_migra_outline_contracts: int
     c2_rows: int
     c2_no_migra_rows: int
     reconciliation_ok: bool
@@ -29,6 +34,14 @@ def _count_documents(df: pd.DataFrame) -> int:
     if "purchase_document" not in df.columns or df.empty:
         return 0
     return int(df["purchase_document"].nunique(dropna=True))
+
+
+def _count_outline_contracts(df: pd.DataFrame) -> int:
+    if "outline_contract" not in df.columns or df.empty:
+        return 0
+    values = df["outline_contract"].dropna().astype(str).str.strip()
+    values = values[values != ""]
+    return int(values.nunique())
 
 
 def _value_counts(df: pd.DataFrame, column: str) -> dict[str, int]:
@@ -51,6 +64,11 @@ def build_segment_summary(
         label=label,
         c1_rows=len(c1),
         c1_documents=_count_documents(c1),
+        c2_documents=_count_documents(c2),
+        c2_no_migra_documents=_count_documents(c2_no_migra),
+        c1_outline_contracts=_count_outline_contracts(c1),
+        c2_outline_contracts=_count_outline_contracts(c2),
+        c2_no_migra_outline_contracts=_count_outline_contracts(c2_no_migra),
         c2_rows=len(c2),
         c2_no_migra_rows=len(c2_no_migra),
         reconciliation_ok=len(c1) == len(c2) + len(c2_no_migra),
@@ -99,6 +117,11 @@ def write_summary_markdown(
             f"## {summary.label}",
             f"- C1 filas: {summary.c1_rows:,}",
             f"- Documentos únicos C1: {summary.c1_documents:,}",
+            f"- Documentos únicos C2: {summary.c2_documents:,}",
+            f"- Documentos únicos C2_NO_MIGRA: {summary.c2_no_migra_documents:,}",
+            f"- Outline contracts únicos C1: {summary.c1_outline_contracts:,}",
+            f"- Outline contracts únicos C2: {summary.c2_outline_contracts:,}",
+            f"- Outline contracts únicos C2_NO_MIGRA: {summary.c2_no_migra_outline_contracts:,}",
             f"- C2 migra: {summary.c2_rows:,}",
             f"- C2 no migra: {summary.c2_no_migra_rows:,}",
             f"- Porcentaje no migra: {summary.excluded_pct:.2f}%",

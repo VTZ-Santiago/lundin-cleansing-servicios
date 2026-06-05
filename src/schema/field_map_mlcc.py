@@ -59,6 +59,7 @@ MLCC_DTYPE_COERCIONS: dict[str, str] = {
     "purchase_group":            "str",
     "release_group":            "str",
     "order_history_ref":         "str",
+    "outline_contract":          "str",
     "purchase_requisition":      "str",
     "purchase_requisition_item": "str",
     "document_date":             "date",

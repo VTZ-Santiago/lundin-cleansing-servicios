@@ -55,16 +55,22 @@ def _autofit(ws, max_width: int = 42) -> None:
 
 
 def _df_to_rows(df: pd.DataFrame) -> list[list]:
-    """Convert DataFrame to a list of lists safe for openpyxl (NaN → None)."""
-    # Convert datetime cols to strings first
+    """Convert DataFrame to rows safe for openpyxl. Datetime cols → Python date objects (native Excel dates)."""
     display = df.copy()
     for col in display.columns:
         if pd.api.types.is_datetime64_any_dtype(display[col]):
-            display[col] = display[col].dt.strftime("%Y-%m-%d").where(
-                display[col].notna(), other=None
-            )
+            display[col] = display[col].apply(lambda x: x.date() if pd.notna(x) else None)
     display = display.astype(object).where(pd.notnull(display), other=None)
     return display.values.tolist()
+
+
+def _date_col_indices(df: pd.DataFrame) -> list[int]:
+    """Return 1-based column indices for datetime columns (for openpyxl DD-MM-YYYY format)."""
+    return [
+        i + 1
+        for i, col in enumerate(df.columns)
+        if pd.api.types.is_datetime64_any_dtype(df[col])
+    ]
 
 
 # --- Analysis table helpers ---
@@ -258,6 +264,11 @@ def _write_master(wb: Workbook, df: pd.DataFrame, master_columns: list[str] | No
         for row_data in _df_to_rows(df_display):
             ws.append(row_data)
 
+        for col_idx in _date_col_indices(df_display):
+            for cell_row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                if cell_row[0].value is not None:
+                    cell_row[0].number_format = "DD-MM-YYYY"
+
         _autofit(ws)
         return
 
@@ -280,6 +291,11 @@ def _write_master(wb: Workbook, df: pd.DataFrame, master_columns: list[str] | No
 
     for row_data in _df_to_rows(df_display):
         ws.append(row_data)
+
+    for col_idx in _date_col_indices(df_display):
+        for cell_row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+            if cell_row[0].value is not None:
+                cell_row[0].number_format = "DD-MM-YYYY"
 
     _autofit(ws)
 

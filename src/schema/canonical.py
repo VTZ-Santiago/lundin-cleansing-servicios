@@ -21,6 +21,7 @@ CANONICAL_SCHEMA: list[CanonicalColumn] = [
     CanonicalColumn("purchase_group",          "Grupo de compras",                    "str",   True,  False, False, "classification"),
     CanonicalColumn("release_group",           "Grupo de liberación",                 "str",   True,  False, False, "classification"),
     CanonicalColumn("order_history_ref",       "Historial pedido/Docu.orden entrega", "str",   True,  False, False, "identity"),
+    CanonicalColumn("outline_contract",        "Contrato marco",                      "str",   True,  False, False, "identity"),
     CanonicalColumn("framework_contract",      "Contrato marco",                      "str",   True,  False, False, "identity"),
     CanonicalColumn("purchase_requisition",    "Solicitud de pedido",                 "str",   True,  False, False, "identity"),
     CanonicalColumn("purchase_requisition_item", "Pos.solicitud pedido",              "str",   True,  False, False, "identity"),

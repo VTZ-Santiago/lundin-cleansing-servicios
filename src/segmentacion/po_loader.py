@@ -16,10 +16,51 @@ from src.ordenes_compra.schema.field_map_mlcc import MLCC_DTYPE_COERCIONS, MLCC_
 
 EXTRA_RAW_TO_CANONICAL = {
     "PR/SOLPED": "purchase_requisition",
-    "Contrato Marco": "framework_contract",
+    "Purchase Requisition": "purchase_requisition",
+    "Purchase Requisition.1": "purchase_requisition",
+    "Contrato marco": "outline_contract",
+    "Contrato Marco": "outline_contract",
+    "Outline Agreement": "outline_contract",
     "Planta": "plant_code",
+    "Plant": "plant_code",
+    "Purchasing Document": "purchase_document",
+    "Item": "position",
+    "Vendor/supplying plant": "vendor",
+    "Vendor/Supplying Plant": "vendor",
+    "Short Text": "short_text",
+    "Item Category": "position_type",
+    "Item Category.1": "position_type",
+    "Purchasing Doc. Type": "purchase_doc_class",
+    "Purch. Doc. Category": "purchase_doc_class",
+    "Release group": "release_group",
+    "Release Group": "release_group",
+    "Deletion Flag": "deletion_flag",
+    "Deletion Indicator": "deletion_flag",
+    "Still to be delivered (qty)": "pending_delivery_qty",
+    "Still to be delivered (value)": "pending_delivery_value",
+    "Document Date": "document_date",
+    "Delivery Date": "delivery_date",
     "Fecha de Termino": "validity_end",
     "Fecha de término": "validity_end",
+    "Validity Period End": "validity_end",
+    "Acct Assignment Cat.": "account_assignment_type",
+}
+
+RAW_HEADER_PRIORITY: dict[str, int] = {
+    "purchasing doc. type": 20,
+    "purch. doc. category": 10,
+    "purchase requisition.1": 20,
+    "purchase requisition": 10,
+    "tipo de posicion": 20,
+    "item category.1": 20,
+    "item category": 10,
+}
+
+RAW_HEADER_OCCURRENCE_PRIORITY: dict[tuple[str, int], int] = {
+    ("purchase requisition", 2): 20,
+    ("purchase requisition", 1): 10,
+    ("item category", 2): 20,
+    ("item category", 1): 10,
 }
 
 WANTED_CANONICAL_COLUMNS = {
@@ -27,8 +68,8 @@ WANTED_CANONICAL_COLUMNS = {
     "deletion_flag",
     "delivery_date",
     "document_date",
-    "framework_contract",
     "material",
+    "outline_contract",
     "pending_delivery_qty",
     "pending_delivery_value",
     "plant_code",
@@ -76,7 +117,15 @@ def _normalize_header(value: object) -> str:
     text = unicodedata.normalize("NFKD", str(value).strip())
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = re.sub(r"\s+", " ", text)
-    return text
+    return text.lower()
+
+
+def _header_priority(header: object, occurrence: int = 1) -> int:
+    normalized = _normalize_header(header)
+    return RAW_HEADER_OCCURRENCE_PRIORITY.get(
+        (normalized, occurrence),
+        RAW_HEADER_PRIORITY.get(normalized, 10),
+    )
 
 
 def _mapping_by_normalized_header() -> dict[str, str]:
@@ -105,14 +154,19 @@ def _excel_files(inputs_root: Path, operation: str) -> list[Path]:
 
 
 def _selected_columns(headers: tuple[object, ...], mapping: dict[str, str]) -> dict[str, tuple[int, str]]:
-    selected: dict[str, tuple[int, str]] = {}
+    selected: dict[str, tuple[int, str, int]] = {}
+    occurrences: dict[str, int] = {}
     for idx, raw_header in enumerate(headers):
-        canonical = mapping.get(_normalize_header(raw_header))
+        normalized = _normalize_header(raw_header)
+        occurrences[normalized] = occurrences.get(normalized, 0) + 1
+        canonical = mapping.get(normalized)
         if canonical is None:
             continue
-        if canonical not in selected:
-            selected[canonical] = (idx, str(raw_header).strip())
-    return selected
+        priority = _header_priority(raw_header, occurrences[normalized])
+        current = selected.get(canonical)
+        if current is None or priority > current[2]:
+            selected[canonical] = (idx, str(raw_header).strip(), priority)
+    return {canonical: (idx, raw) for canonical, (idx, raw, _) in selected.items()}
 
 
 def _clean_text(value: object) -> object:
@@ -141,17 +195,17 @@ def _coerce_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _stream_file(path: Path, operation: str, mapping: dict[str, str]) -> tuple[list[dict[str, object]], SourceFileStats, dict[str, str]]:
+def _stream_file(path: Path, operation: str, mapping: dict[str, str]) -> tuple[pd.DataFrame, SourceFileStats, dict[str, str]]:
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb[wb.sheetnames[0]]
         header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
         if header_row is None:
-            return [], SourceFileStats(path.name, skipped=True, skip_reason="Empty workbook"), {}
+            return pd.DataFrame(), SourceFileStats(path.name, skipped=True, skip_reason="Empty workbook"), {}
 
         selected_columns = _selected_columns(header_row, mapping)
         if "purchase_document" not in selected_columns or "position" not in selected_columns:
-            return [], SourceFileStats(
+            return pd.DataFrame(), SourceFileStats(
                 path.name,
                 skipped=True,
                 skip_reason="Missing purchase_document or position",
@@ -178,7 +232,7 @@ def _stream_file(path: Path, operation: str, mapping: dict[str, str]) -> tuple[l
         df["_operation"] = operation.upper()
         df = _coerce_dataframe(df)
 
-        return df.to_dict("records"), SourceFileStats(path.name, rows_read=rows_read, rows_kept=len(df)), raw_by_canonical
+        return df, SourceFileStats(path.name, rows_read=rows_read, rows_kept=len(df)), raw_by_canonical
     finally:
         wb.close()
 
@@ -219,18 +273,19 @@ def _build_lineage(df: pd.DataFrame, raw_names: dict[str, set[str]]) -> LineageR
 def load_purchase_orders(inputs_root: Path, operation: str = "MLCC") -> PurchaseOrderLoadResult:
     started = datetime.now()
     mapping = _mapping_by_normalized_header()
-    rows: list[dict[str, object]] = []
+    frames: list[pd.DataFrame] = []
     stats: list[SourceFileStats] = []
     raw_names: dict[str, set[str]] = {}
 
     for path in _excel_files(inputs_root, operation):
-        file_rows, file_stat, raw_by_canonical = _stream_file(path, operation, mapping)
-        rows.extend(file_rows)
+        file_df, file_stat, raw_by_canonical = _stream_file(path, operation, mapping)
+        if not file_df.empty:
+            frames.append(file_df)
         stats.append(file_stat)
         for canonical, raw in raw_by_canonical.items():
             raw_names.setdefault(canonical, set()).add(raw)
 
-    df = pd.DataFrame(rows)
+    df = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
     if not df.empty:
         leading = [c for c in ("purchase_document", "position", "purchase_doc_class", "position_type") if c in df.columns]
         trailing = [c for c in ("_source_file", "_operation") if c in df.columns]
@@ -240,7 +295,7 @@ def load_purchase_orders(inputs_root: Path, operation: str = "MLCC") -> Purchase
     lineage = _build_lineage(df, raw_names)
     manifest = StageManifest(
         stage_id="PO_STREAM_LOAD",
-        label="Carga streaming de ordenes de compra MLCC",
+        label=f"Carga streaming de ordenes de compra {operation.upper()}",
         started_at=started,
         completed_at=datetime.now(),
         rows_in=sum(stat.rows_read for stat in stats),

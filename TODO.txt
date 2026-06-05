@@ -22,4 +22,4 @@
 - Validar con negocio el nuevo flujo `src/segmentacion` y recién después decidir si mover los flujos históricos de `src/contratos` y `src/ordenes_compra` a una carpeta `legacy/`.
 - Si aparecen más reglas compartidas entre contratos y órdenes de servicio, extraerlas a un módulo común reutilizable en vez de duplicarlas por segmento.
 - Incorporar el bloque de órdenes de servicio de reparación cuando se confirme su criterio de negocio.
-- Si se amplía el flujo segmentado a CCMC o a más variantes de headers en inglés, separar perfiles de headers por operación en vez de seguir creciendo con aliases sueltos.
+- Separar perfiles de headers por operación en el flujo segmentado si aparecen nuevas variantes MLCC/CCMC, en vez de seguir creciendo con aliases sueltos.

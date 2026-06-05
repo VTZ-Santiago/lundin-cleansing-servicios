@@ -1,30 +1,32 @@
 # lundin-cleansing-servicios
 
-Pipeline de limpieza, identificación, segmentación y control de datos para **convenios/contratos**, **órdenes de compra** y segmentos derivados desde OC MLCC.
+Pipeline de limpieza, identificación, segmentación y control de datos para **convenios/contratos**, **órdenes de compra** y segmentos derivados desde OC MLCC/CCMC.
 
 La rama `all-rules` ajusta las reglas al alcance descrito en `resources/Aumento alcance servicio Data cleansing vf2.pdf`. El alcance activo se limita a los dominios con inputs disponibles en este repositorio:
 
 - `contratos`: convenios/contratos SAP en `inputs/MLCC/contratos`.
-- `ordenes-compra`: órdenes de compra de material catalogado y cargo directo en `inputs/MLCC/ordenes-compra`.
+- `ordenes-compra`: órdenes de compra de material catalogado y cargo directo en `inputs/<operacion>/ordenes-compra`.
 
 Los puntos del PDF sobre órdenes de servicio, HES, PR/SOLPED y reservas quedan documentados como alcance no activo porque no existe un dominio de entrada separado para esos paquetes de datos.
 
-## Nuevo flujo: segmentación MLCC desde órdenes
+## Nuevo flujo: segmentación MLCC/CCMC desde órdenes
 
-El flujo `run_segmentacion_mlcc.py` parte desde todos los Excel de `inputs/MLCC/ordenes-compra`, sin conservar la separación por período, y segmenta el universo inicial en:
+El flujo `run_segmentacion_mlcc.py` parte desde todos los Excel de `inputs/<operacion>/ordenes-compra`, sin conservar la separación por período, y segmenta el universo inicial en:
 
 - `contratos`: órdenes que cumplen los criterios de contratos definidos en `tmp/Caracterización de Contratos.xlsx`.
 - `ordenes_servicio`: órdenes de servicio definidas en el mismo archivo.
 
 El bloque de órdenes de servicio de reparación del archivo de caracterización no se considera todavía.
 
-La segmentación `C1` ignora fechas y saldos por entregar. Luego aplica una exclusión común `E01` que envía a `C2_NO_MIGRA` las filas con fecha efectiva `Fecha de Entrega` con fallback a `Fecha de Termino` menor o igual a `2026-06-30` y sin cantidad ni valor por entregar. Las filas restantes quedan en `C2`.
+La segmentación `C1` ignora fechas y saldos por entregar. En MLCC, el segmento `contratos` no exige `outline_contract` y los solapamientos se resuelven priorizando `ordenes_servicio`; en CCMC, `contratos` sí exige `outline_contract` porque el campo está disponible y es discriminante. Para CCMC se usan headers en inglés como `Outline Agreement`, `Plant`, `Purchasing Doc. Type`, `Item Category.1`, `Release group` y `Deletion Indicator`.
+
+Luego aplica una exclusión común `E01` que envía a `C2_NO_MIGRA` las filas con fecha efectiva `delivery_date` con fallback a `validity_end` menor o igual a `2026-06-30`, o sin saldo pendiente por entregar, o con `deletion_flag`/indicador de borrado informado. Las filas restantes quedan en `C2`.
 
 El código histórico en `src/contratos` y `src/ordenes_compra` se mantiene intacto; el nuevo flujo vive en `src/segmentacion`.
 
 El flujo mantiene un cache persistente en `tmp/cache/segmentacion_mlcc` para reutilizar tanto el universo consolidado de OC como el cruce con `MLCC - Análisis Completo.xlsx`. Si se necesita reconstruir desde cero, usar `--no-cache`.
 
-Los control points del flujo segmentado muestran en la hoja **Master** solo las columnas presentes en `tmp/Caracterización de Contratos.xlsx`, más `Grupo de liberación` e `Indicador de borrado`.
+Los control points del flujo segmentado muestran en la hoja **Master** las columnas presentes en `tmp/Caracterización de Contratos.xlsx`, usando `outline_contract` como nombre canónico, más `release_group` y `deletion_flag`.
 
 ## Dependencia crítica: cruce de materiales
 
@@ -130,8 +132,14 @@ venv\Scripts\python.exe pipeline.py --domain ordenes-compra --operation MLCC --s
 # Segmentación MLCC desde todas las órdenes de compra
 venv\Scripts\python.exe run_segmentacion_mlcc.py --operation MLCC
 
+# Segmentación CCMC desde todas las órdenes de compra
+venv\Scripts\python.exe run_segmentacion_mlcc.py --operation CCMC
+
 # Verificación rápida de segmentación sin escribir workbooks pesados
 venv\Scripts\python.exe run_segmentacion_mlcc.py --operation MLCC --skip-control-points
+
+# Verificación rápida de segmentación sin cruce material
+venv\Scripts\python.exe run_segmentacion_mlcc.py --operation CCMC --skip-control-points --skip-material-enrichment
 
 # Fuerza reconstrucción del universo base y del cruce, sin reutilizar cache persistente
 venv\Scripts\python.exe run_segmentacion_mlcc.py --operation MLCC --no-cache
@@ -161,13 +169,13 @@ Para validaciones de reglas sobre dominios grandes se pueden usar `--skip-contro
 | `outputs/ordenes_compra/control_points/C1_MLCC.xlsx` | Órdenes normalizadas y enriquecidas con materiales. |
 | `outputs/ordenes_compra/control_points/C2_NO_MIGRA_MLCC.xlsx` | Órdenes concluidas por reglas EXCLUDE activas. |
 | `outputs/ordenes_compra/control_points/C3_MLCC.xlsx` | Órdenes que continúan, con marcas PDF. |
-| `outputs/control_points/contratos/C1_MLCC.xlsx` | Segmento contratos pre-exclusión desde OC. |
-| `outputs/control_points/contratos/C2_MLCC.xlsx` | Segmento contratos que migra post-exclusión común. |
-| `outputs/control_points/contratos/C2_NO_MIGRA_MLCC.xlsx` | Segmento contratos excluido por fecha/saldo. |
-| `outputs/control_points/ordenes_servicio/C1_MLCC.xlsx` | Segmento órdenes de servicio pre-exclusión desde OC. |
-| `outputs/control_points/ordenes_servicio/C2_MLCC.xlsx` | Segmento órdenes de servicio que migra post-exclusión común. |
-| `outputs/control_points/ordenes_servicio/C2_NO_MIGRA_MLCC.xlsx` | Segmento órdenes de servicio excluido por fecha/saldo. |
-| `outputs/control_points/resumen_segmentacion_MLCC.md` | Conteos simples y reconciliación del flujo segmentado. |
+| `outputs/control_points/contratos/C1_<operacion>.xlsx` | Segmento contratos pre-exclusión desde OC. |
+| `outputs/control_points/contratos/C2_<operacion>.xlsx` | Segmento contratos que migra post-exclusión común. |
+| `outputs/control_points/contratos/C2_NO_MIGRA_<operacion>.xlsx` | Segmento contratos excluido por fecha efectiva `<= 2026-06-30`, saldo pendiente o indicador de borrado. |
+| `outputs/control_points/ordenes_servicio/C1_<operacion>.xlsx` | Segmento órdenes de servicio pre-exclusión desde OC. |
+| `outputs/control_points/ordenes_servicio/C2_<operacion>.xlsx` | Segmento órdenes de servicio que migra post-exclusión común. |
+| `outputs/control_points/ordenes_servicio/C2_NO_MIGRA_<operacion>.xlsx` | Segmento órdenes de servicio excluido por fecha efectiva `<= 2026-06-30`, saldo pendiente o indicador de borrado. |
+| `outputs/control_points/resumen_segmentacion_<operacion>.md` | Conteos de filas, documentos únicos, outline contracts únicos y reconciliación del flujo segmentado. |
 | `outputs/material_crossref/reporte_materiales_*.xlsx` | Reporte standalone de cobertura de materiales. |
 
 Cada control point incluye hojas **Info**, **Master**, **Field Map**, **Issues**, **Stages** y **Profiling**. La hoja **Master** muestra columnas canónicas, columnas `mark_*` y columnas `material_*` inyectadas por el cruce.

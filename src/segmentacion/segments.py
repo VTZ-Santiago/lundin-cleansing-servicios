@@ -18,6 +18,7 @@ class SegmentMatchResult:
     masks: dict[str, pd.Series]
     overlaps: pd.DataFrame
     unclassified: pd.DataFrame
+    resolved_overlap_rows: int = 0
 
 
 def _empty_like(df: pd.DataFrame) -> pd.Series:
@@ -50,20 +51,53 @@ def _rule_mask(df: pd.DataFrame, rule: SegmentRule) -> pd.Series:
     return mask
 
 
-def apply_segment_rules(df: pd.DataFrame, rules: list[SegmentRule]) -> SegmentMatchResult:
+def _resolve_masks_by_priority(
+    masks: dict[str, pd.Series],
+    priority: list[str] | None,
+) -> dict[str, pd.Series]:
+    if not priority or not masks:
+        return masks
+
+    resolved = {segment_id: _empty_like(next(iter(masks.values()))) for segment_id in masks}
+    unassigned = pd.Series(True, index=next(iter(masks.values())).index, dtype="bool")
+    ordered = [segment_id for segment_id in priority if segment_id in masks]
+    ordered.extend(segment_id for segment_id in sorted(masks) if segment_id not in ordered)
+    for segment_id in ordered:
+        selected = masks[segment_id] & unassigned
+        resolved[segment_id] = selected
+        unassigned &= ~selected
+    return resolved
+
+
+def apply_segment_rules(
+    df: pd.DataFrame,
+    rules: list[SegmentRule],
+    priority: list[str] | None = None,
+) -> SegmentMatchResult:
     segment_ids = sorted({rule.segment_id for rule in rules})
-    masks = {segment_id: _empty_like(df) for segment_id in segment_ids}
+    raw_masks = {segment_id: _empty_like(df) for segment_id in segment_ids}
     for rule in rules:
-        masks[rule.segment_id] |= _rule_mask(df, rule)
+        raw_masks[rule.segment_id] |= _rule_mask(df, rule)
 
-    match_count = sum(mask.astype(int) for mask in masks.values()) if masks else pd.Series(0, index=df.index)
+    match_count = sum(mask.astype(int) for mask in raw_masks.values()) if raw_masks else pd.Series(0, index=df.index)
     overlaps = df[match_count.gt(1)].copy()
-    unclassified = df[match_count.eq(0)].copy()
-    return SegmentMatchResult(masks=masks, overlaps=overlaps, unclassified=unclassified)
+    masks = _resolve_masks_by_priority(raw_masks, priority)
+    final_match_count = sum(mask.astype(int) for mask in masks.values()) if masks else pd.Series(0, index=df.index)
+    unclassified = df[final_match_count.eq(0)].copy()
+    return SegmentMatchResult(
+        masks=masks,
+        overlaps=overlaps,
+        unclassified=unclassified,
+        resolved_overlap_rows=len(overlaps) if priority else 0,
+    )
 
 
-def segment_dataframe(df: pd.DataFrame, rules: list[SegmentRule]) -> tuple[dict[str, pd.DataFrame], SegmentMatchResult]:
-    result = apply_segment_rules(df, rules)
+def segment_dataframe(
+    df: pd.DataFrame,
+    rules: list[SegmentRule],
+    priority: list[str] | None = None,
+) -> tuple[dict[str, pd.DataFrame], SegmentMatchResult]:
+    result = apply_segment_rules(df, rules, priority=priority)
     segments = {
         segment_id: df[mask].copy()
         for segment_id, mask in result.masks.items()

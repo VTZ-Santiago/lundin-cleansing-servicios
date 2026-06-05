@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 import pandas as pd
+import yaml
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -20,18 +21,20 @@ from src.lineage.records import FieldLineageRecord, StageManifest
 from src.material_crossref.enrichment import enrich_material_rows
 from src.material_crossref.loader import load_material_master
 from src.output.control_point import export_control_point
+from src.output.deliverable import export_deliverable
 from src.profiling.profiler import DataProfiler
 from src.rules.engine import RuleEngine
-from src.segmentacion.characterization import load_segment_rules
+from src.segmentacion.characterization import SegmentRule, load_segment_rules
 from src.segmentacion.po_loader import PurchaseOrderLoadResult, load_purchase_orders
 from src.segmentacion.report import build_segment_summary, write_summary_markdown
 from src.segmentacion.segments import SEGMENT_LABELS, segment_dataframe
 
 
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "control_points"
+DEFAULT_ENTREGABLES_DIR = ROOT / "outputs" / "entregables"
 DEFAULT_CACHE_DIR = ROOT / "tmp" / "cache" / "segmentacion_mlcc"
 LEGACY_OUTPUT_DIR = ROOT / "outputs" / "segmentacion_mlcc"
-CACHE_VERSION = "2026-05-29-v1"
+CACHE_VERSION = "2026-06-01-v4"
 LEGACY_ROOT_CONTROL_POINTS = (
     "C1_MLCC.xlsx",
     "C2_MLCC.xlsx",
@@ -42,7 +45,7 @@ RULES_YAML = ROOT / "src" / "segmentacion" / "rules" / "rules.yaml"
 CONTROL_POINT_COLUMNS = [
     "plant_code",
     "purchase_requisition",
-    "framework_contract",
+    "outline_contract",
     "purchase_document",
     "position",
     "material",
@@ -173,7 +176,7 @@ def _enrichment_cache_metadata(operation: str) -> dict[str, Any]:
 
 def _load_purchase_orders_cached(operation: str, use_cache: bool) -> PurchaseOrderLoadResult:
     cache_name = f"po_universe_{operation.lower()}"
-    cache_label = "universo OC MLCC"
+    cache_label = f"universo OC {operation.upper()}"
     metadata = _po_cache_metadata(operation)
     cached = _load_cache(cache_name, cache_label, metadata, use_cache)
     if cached is not None:
@@ -304,6 +307,35 @@ def _segment_manifest(total_rows: int, classified_rows: int, overlap_rows: int, 
     )
 
 
+def _drop_rule_conditions(
+    rules: list[SegmentRule],
+    operation: str,
+) -> list[SegmentRule]:
+    operation = operation.upper()
+    drop_columns_by_segment: dict[str, set[str]] = {}
+    if operation == "MLCC":
+        drop_columns_by_segment = {"contratos": {"outline_contract"}}
+    elif operation == "CCMC":
+        drop_columns_by_segment = {
+            "contratos": {"plant_code", "purchase_doc_class"},
+            "ordenes_servicio": {"plant_code", "purchase_doc_class"},
+        }
+
+    adjusted: list[SegmentRule] = []
+    for rule in rules:
+        drop_columns = drop_columns_by_segment.get(rule.segment_id, set())
+        conditions = tuple(condition for condition in rule.conditions if condition.column not in drop_columns)
+        if conditions:
+            adjusted.append(SegmentRule(rule.segment_id, rule.source_sheet, rule.source_row, conditions))
+    return adjusted
+
+
+def _segment_priority(operation: str) -> list[str] | None:
+    if operation.upper() == "MLCC":
+        return ["ordenes_servicio", "contratos"]
+    return None
+
+
 def _export_cp(
     cp_id: str,
     description: str,
@@ -328,9 +360,49 @@ def _export_cp(
         issues=issues,
         output_dir=output_dir,
         include_analysis=False,
-        analysis_subject="Segmentacion MLCC",
+        analysis_subject=f"Segmentacion {operation}",
         master_columns=CONTROL_POINT_COLUMNS,
     )
+
+
+def _load_e01_config() -> dict:
+    with open(RULES_YAML, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    for rule in cfg["groups"]["G1_EXCLUSIONS"]["rules"]:
+        if rule["id"] == "E01":
+            return rule.get("config", {})
+    return {}
+
+
+def _vencidos_con_saldo_pendiente(df: pd.DataFrame, e01_config: dict) -> pd.DataFrame:
+    """Return rows that are past the cutoff date but still carry a pending delivery balance.
+
+    These records are already excluded (they land in C2_NO_MIGRA), but the combination
+    of an expired delivery date with outstanding balance may warrant follow-up.
+    """
+    cutoff_raw = e01_config.get("cutoff_date")
+    if not cutoff_raw:
+        return df.iloc[:0].copy()
+
+    cutoff = pd.to_datetime(cutoff_raw, errors="coerce")
+    if pd.isna(cutoff):
+        return df.iloc[:0].copy()
+
+    primary_col = e01_config.get("primary_date_column", "delivery_date")
+    fallback_col = e01_config.get("fallback_date_column", "validity_end")
+    qty_col = e01_config.get("pending_qty_column", "pending_delivery_qty")
+    value_col = e01_config.get("pending_value_column", "pending_delivery_value")
+
+    primary = pd.to_datetime(df.get(primary_col, pd.Series(pd.NaT, index=df.index)), errors="coerce")
+    fallback = pd.to_datetime(df.get(fallback_col, pd.Series(pd.NaT, index=df.index)), errors="coerce")
+    effective_date = primary.fillna(fallback)
+
+    pending_qty = pd.to_numeric(df.get(qty_col, pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+    pending_value = pd.to_numeric(df.get(value_col, pd.Series(0, index=df.index)), errors="coerce").fillna(0)
+
+    expired = effective_date.notna() & effective_date.le(cutoff)
+    has_balance = (pending_qty > 0) | (pending_value > 0)
+    return df[expired & has_balance].copy()
 
 
 def _apply_migration_rules(df: pd.DataFrame, operation: str) -> tuple[pd.DataFrame, list, list[StageManifest]]:
@@ -344,6 +416,7 @@ def run(
     operation: str = "MLCC",
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     export_control_points: bool = True,
+    export_entregables: bool = True,
     enrich_materials: bool = True,
     allow_overlap: bool = False,
     use_cache: bool = True,
@@ -352,7 +425,7 @@ def run(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Cargando criterios de segmentacion desde {_characterization_path()}...")
-    segment_rules = load_segment_rules(_characterization_path())
+    segment_rules = _drop_rule_conditions(load_segment_rules(_characterization_path()), operation)
     print(f"Criterios de segmentacion: {len(segment_rules):,}")
 
     load_result = _load_purchase_orders_cached(operation, use_cache=use_cache)
@@ -364,7 +437,8 @@ def run(
         master, material_manifest = _load_material_enrichment_cached(master, operation, load_result, use_cache=use_cache)
         manifests.append(material_manifest)
 
-    segments, match_result = segment_dataframe(master, segment_rules)
+    segment_priority = _segment_priority(operation)
+    segments, match_result = segment_dataframe(master, segment_rules, priority=segment_priority)
     classified_rows = sum(len(df) for df in segments.values())
     segmentation_manifest = _segment_manifest(
         total_rows=len(master),
@@ -374,13 +448,16 @@ def run(
     )
     manifests.append(segmentation_manifest)
 
-    if len(match_result.overlaps) and not allow_overlap:
+    if len(match_result.overlaps) and not (allow_overlap or segment_priority):
         sample_path = output_dir / f"solapamientos_{operation}.xlsx"
         match_result.overlaps.head(200).to_excel(sample_path, index=False)
         raise RuntimeError(
             f"Hay {len(match_result.overlaps):,} filas con solapamiento entre segmentos. "
             f"Muestra guardada en {sample_path}."
         )
+
+    e01_config = _load_e01_config()
+    entregables_dir = output_dir.parent / "entregables"
 
     summaries = []
     for segment_id in sorted(segments):
@@ -391,7 +468,7 @@ def run(
         if export_control_points:
             _export_cp(
                 "C1",
-                f"Segmentacion inicial: {label.lower()} desde ordenes de compra MLCC.",
+                f"Segmentacion inicial: {label.lower()} desde ordenes de compra {operation}.",
                 operation,
                 c1,
                 manifests,
@@ -427,6 +504,24 @@ def run(
                 load_result,
             )
 
+        if export_entregables:
+            export_cols = [col for col in CONTROL_POINT_COLUMNS if col in c2.columns]
+            export_deliverable(
+                c2[export_cols].copy(),
+                entregables_dir / f"OC_migra_{segment_id}_{operation}.xlsx",
+                sheet_name="C2_MIGRA",
+            )
+            vencidos = _vencidos_con_saldo_pendiente(c2_no_migra, e01_config)
+            export_deliverable(
+                vencidos[export_cols].copy(),
+                entregables_dir / f"OC_vencidos_saldo_{segment_id}_{operation}.xlsx",
+                sheet_name="VENCIDOS_SALDO_PENDIENTE",
+            )
+            print(
+                f"  Entregables {operation} {label}: "
+                f"migra={len(c2):,} | vencidos_saldo={len(vencidos):,}"
+            )
+
         summary = build_segment_summary(segment_id, label, c1, c2, c2_no_migra)
         summaries.append(summary)
         print(
@@ -459,11 +554,12 @@ def run(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Segmenta MLCC en Contratos y Ordenes de Servicio desde ordenes de compra.",
+        description="Segmenta operaciones en Contratos y Ordenes de Servicio desde ordenes de compra.",
     )
-    parser.add_argument("--operation", "-o", default="MLCC", choices=["MLCC"], help="Operacion a procesar.")
+    parser.add_argument("--operation", "-o", default="MLCC", choices=["MLCC", "CCMC"], help="Operacion a procesar.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Directorio base de salida.")
     parser.add_argument("--skip-control-points", action="store_true", help="Omite workbooks C1/C2/C2_NO_MIGRA.")
+    parser.add_argument("--skip-entregables", action="store_true", help="Omite Excel entregables (C2 migra y vencidos con saldo).")
     parser.add_argument("--skip-material-enrichment", action="store_true", help="Omite cruce con Analisis Completo.")
     parser.add_argument("--allow-overlap", action="store_true", help="No falla si una fila cae en mas de un segmento.")
     parser.add_argument("--no-cache", action="store_true", help="Omite cache persistente y reconstruye el flujo base.")
@@ -476,6 +572,7 @@ if __name__ == "__main__":
         operation=args.operation,
         output_dir=args.output_dir,
         export_control_points=not args.skip_control_points,
+        export_entregables=not args.skip_entregables,
         enrich_materials=not args.skip_material_enrichment,
         allow_overlap=args.allow_overlap,
         use_cache=not args.no_cache,

@@ -4,8 +4,8 @@ groups:
     control_point_out: C2
     rules:
       - id: E01
-        name: "Excluir registros cerrados o vencidos hasta junio 2026 sin saldo por entregar"
-        enabled: {MLCC: true}
+        name: "Excluir registros con fecha efectiva <= 2026-06-30, sin saldo pendiente o con indicador de borrado"
+        enabled: {MLCC: true, CCMC: true}
         priority: 1
         severity: ERROR
         action: EXCLUDE
@@ -15,6 +15,7 @@ groups:
           fallback_date_column: "validity_end"
           pending_qty_column: "pending_delivery_qty"
           pending_value_column: "pending_delivery_value"
+          deletion_flag_column: "deletion_flag"
 
   G2_RESCUE:
     name: "Grupo 2 — Rescates segmentación"

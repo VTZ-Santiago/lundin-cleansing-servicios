@@ -11,7 +11,7 @@ import openpyxl
 HEADER_ALIASES: dict[str, str] = {
     "planta": "plant_code",
     "pr/solped": "purchase_requisition",
-    "contrato marco": "framework_contract",
+    "contrato marco": "outline_contract",
     "documento compras": "purchase_document",
     "posicion": "position",
     "material": "material",
