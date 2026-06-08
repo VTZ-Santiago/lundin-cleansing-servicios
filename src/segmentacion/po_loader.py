@@ -32,6 +32,7 @@ EXTRA_RAW_TO_CANONICAL = {
     "Item Category.1": "position_type",
     "Purchasing Doc. Type": "purchase_doc_class",
     "Purch. Doc. Category": "purchase_doc_class",
+    "Purchasing Group": "purchase_group",
     "Release group": "release_group",
     "Release Group": "release_group",
     "Deletion Flag": "deletion_flag",
@@ -195,6 +196,13 @@ def _coerce_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _has_selected_values(row_values: tuple[object, ...], selected_columns: dict[str, tuple[int, str]]) -> bool:
+    for idx, _ in selected_columns.values():
+        if idx < len(row_values) and not pd.isna(row_values[idx]):
+            return True
+    return False
+
+
 def _stream_file(path: Path, operation: str, mapping: dict[str, str]) -> tuple[pd.DataFrame, SourceFileStats, dict[str, str]]:
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
@@ -212,22 +220,29 @@ def _stream_file(path: Path, operation: str, mapping: dict[str, str]) -> tuple[p
             ), {}
 
         raw_by_canonical = {canonical: raw for canonical, (_, raw) in selected_columns.items()}
-        ordered = sorted(selected_columns.items(), key=lambda item: item[1][0])
-        usecols = [idx for _, (idx, _) in ordered]
-        canonical_columns = [canonical for canonical, _ in ordered]
+        canonical_columns = [canonical for canonical, _ in sorted(selected_columns.items(), key=lambda item: item[1][0])]
 
-        df = pd.read_excel(
-            path,
-            engine="openpyxl",
-            dtype=object,
-            usecols=usecols,
-        )
-        df.columns = canonical_columns
-        rows_read = int(df.dropna(how="all").shape[0])
+        rows: list[dict[str, object]] = []
+        rows_read = 0
+        last_purchase_document = None
+        max_selected_col = max(idx for idx, _ in selected_columns.values()) + 1
+        for row_values in ws.iter_rows(min_row=2, max_col=max_selected_col, values_only=True):
+            if not _has_selected_values(row_values, selected_columns):
+                continue
+            rows_read += 1
+            row = {
+                canonical: row_values[idx] if idx < len(row_values) else None
+                for canonical, (idx, _) in selected_columns.items()
+            }
+            if pd.isna(row.get("purchase_document")):
+                row["purchase_document"] = last_purchase_document
+            else:
+                last_purchase_document = row.get("purchase_document")
+            if pd.isna(row.get("purchase_document")) and pd.isna(row.get("position")):
+                continue
+            rows.append(row)
 
-        if "purchase_document" in df.columns:
-            df["purchase_document"] = df["purchase_document"].ffill()
-        df = df[~(df["purchase_document"].isna() & df["position"].isna())].copy()
+        df = pd.DataFrame(rows, columns=canonical_columns)
         df["_source_file"] = path.name
         df["_operation"] = operation.upper()
         df = _coerce_dataframe(df)
@@ -278,6 +293,7 @@ def load_purchase_orders(inputs_root: Path, operation: str = "MLCC") -> Purchase
     raw_names: dict[str, set[str]] = {}
 
     for path in _excel_files(inputs_root, operation):
+        print(f"  Leyendo [{operation.upper()}] {path.name}", flush=True)
         file_df, file_stat, raw_by_canonical = _stream_file(path, operation, mapping)
         if not file_df.empty:
             frames.append(file_df)

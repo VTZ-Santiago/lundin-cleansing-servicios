@@ -34,7 +34,7 @@ DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "control_points"
 DEFAULT_ENTREGABLES_DIR = ROOT / "outputs" / "entregables"
 DEFAULT_CACHE_DIR = ROOT / "tmp" / "cache" / "segmentacion_mlcc"
 LEGACY_OUTPUT_DIR = ROOT / "outputs" / "segmentacion_mlcc"
-CACHE_VERSION = "2026-06-01-v4"
+CACHE_VERSION = "2026-06-08-v1"
 LEGACY_ROOT_CONTROL_POINTS = (
     "C1_MLCC.xlsx",
     "C2_MLCC.xlsx",
@@ -53,6 +53,7 @@ CONTROL_POINT_COLUMNS = [
     "short_text",
     "position_type",
     "purchase_doc_class",
+    "purchase_group",
     "release_group",
     "pending_delivery_qty",
     "pending_delivery_value",
@@ -438,8 +439,15 @@ def run(
         manifests.append(material_manifest)
 
     segment_priority = _segment_priority(operation)
+    print("Segmentando universo OC...", flush=True)
     segments, match_result = segment_dataframe(master, segment_rules, priority=segment_priority)
     classified_rows = sum(len(df) for df in segments.values())
+    print(
+        f"Segmentacion lista: clasificados={classified_rows:,} | "
+        f"solapamientos={len(match_result.overlaps):,} | "
+        f"sin_clasificar={len(match_result.unclassified):,}",
+        flush=True,
+    )
     segmentation_manifest = _segment_manifest(
         total_rows=len(master),
         classified_rows=classified_rows,
@@ -464,6 +472,7 @@ def run(
         label = SEGMENT_LABELS.get(segment_id, segment_id)
         c1 = segments[segment_id]
         segment_output_dir = output_dir / segment_id
+        print(f"Procesando segmento {operation} {label}: C1={len(c1):,}", flush=True)
 
         if export_control_points:
             _export_cp(
@@ -480,6 +489,11 @@ def run(
         ruled, issues, rule_manifests = _apply_migration_rules(c1, operation)
         c2_no_migra = ruled[ruled["exclusion_reason"] != ""].copy()
         c2 = ruled[ruled["exclusion_reason"] == ""].copy()
+        print(
+            f"  Reglas {operation} {label}: C2={len(c2):,} | "
+            f"C2_NO_MIGRA={len(c2_no_migra):,}",
+            flush=True,
+        )
 
         if export_control_points:
             cp_manifests = [*manifests, *rule_manifests]

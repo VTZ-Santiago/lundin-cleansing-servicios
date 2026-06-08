@@ -4,9 +4,22 @@ import re
 import unicodedata
 
 import pandas as pd
+from openpyxl.cell import WriteOnlyCell
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+
+from src.ordenes_compra.exchange_rates import load_usd_rates
+
+
+FX_RATE_DATE = "2026-06-08"
+MIN_DELIVERY_DATE = pd.Timestamp("2025-01-01")
+NET_ORDER_VALUE_HEADER = "Valor neto de pedido"
+CURRENCY_HEADER = "Moneda"
+USD_RATE_HEADER = f"Tasa cambio USD ({FX_RATE_DATE})"
+NET_ORDER_VALUE_USD_HEADER = "Valor neto de pedido USD"
+DERIVED_HEADERS = {USD_RATE_HEADER, NET_ORDER_VALUE_USD_HEADER}
+DEFAULT_FX_RATES_PATH = Path(__file__).resolve().parents[2] / "resources" / f"fx_rates_{FX_RATE_DATE}.json"
 
 
 OUTPUT_HEADERS: list[str] = [
@@ -23,6 +36,10 @@ OUTPUT_HEADERS: list[str] = [
     "Grupo de liberación",
     "Por entregar (cantidad)",
     "Por entregar (valor)",
+    NET_ORDER_VALUE_HEADER,
+    CURRENCY_HEADER,
+    USD_RATE_HEADER,
+    NET_ORDER_VALUE_USD_HEADER,
     "Fecha documento",
     "Fecha de Entrega",
     "Fecha de Termino",
@@ -31,8 +48,18 @@ OUTPUT_HEADERS: list[str] = [
 
 DATE_HEADERS = ["Fecha documento", "Fecha de Entrega", "Fecha de Termino"]
 ID_HEADERS = ["PR/SOLPED", "Contrato Marco", "Documento compras", "Posición", "Material"]
-NUMERIC_HEADERS = ["Por entregar (cantidad)", "Por entregar (valor)"]
+NUMERIC_HEADERS = [
+    "Por entregar (cantidad)",
+    "Por entregar (valor)",
+    NET_ORDER_VALUE_HEADER,
+    USD_RATE_HEADER,
+    NET_ORDER_VALUE_USD_HEADER,
+]
+NUMERIC_FORMATS = {
+    USD_RATE_HEADER: "0.000000",
+}
 REQUIRED_HEADERS = ["Documento compras", "Posición"]
+SOURCE_HEADERS = [header for header in OUTPUT_HEADERS if header not in DERIVED_HEADERS]
 RAW_TO_OUTPUT: dict[str, str] = {
     "centro": "Planta",
     "plant": "Planta",
@@ -63,6 +90,10 @@ RAW_TO_OUTPUT: dict[str, str] = {
     "still to be delivered (qty)": "Por entregar (cantidad)",
     "por entregar (valor)": "Por entregar (valor)",
     "still to be delivered (value)": "Por entregar (valor)",
+    "valor neto de pedido": NET_ORDER_VALUE_HEADER,
+    "net order value": NET_ORDER_VALUE_HEADER,
+    "moneda": CURRENCY_HEADER,
+    "currency": CURRENCY_HEADER,
     "fecha documento": "Fecha documento",
     "document date": "Fecha documento",
     "fecha de entrega": "Fecha de Entrega",
@@ -158,6 +189,14 @@ def _excel_files(inputs_root: Path, operation: str) -> list[Path]:
     return files
 
 
+def _period_end_from_filename(path: Path) -> pd.Timestamp | None:
+    matches = re.findall(r"(\d{2})\.(\d{2})\.(\d{4})", path.stem)
+    if not matches:
+        return None
+    dates = [pd.Timestamp(year=int(year), month=int(month), day=int(day)) for day, month, year in matches]
+    return max(dates)
+
+
 def _selected_columns(raw_headers: tuple[object, ...]) -> dict[str, tuple[int, object]]:
     selected: dict[str, tuple[object, int]] = {}
     occurrences: dict[str, int] = {}
@@ -222,6 +261,13 @@ def _clean_numeric_value(value: object) -> object:
     return float(parsed)
 
 
+def _clean_currency_value(value: object) -> object:
+    text = _clean_text_value(value)
+    if text is None:
+        return None
+    return str(text).upper()
+
+
 def _clean_output_row(raw_values: dict[str, object], last_purchase_document: object) -> tuple[dict[str, object], object]:
     row: dict[str, object] = {}
     for header in OUTPUT_HEADERS:
@@ -232,6 +278,8 @@ def _clean_output_row(raw_values: dict[str, object], last_purchase_document: obj
             row[header] = _clean_numeric_value(value)
         elif header in ID_HEADERS:
             row[header] = _clean_identifier_value(value)
+        elif header == CURRENCY_HEADER:
+            row[header] = _clean_currency_value(value)
         else:
             row[header] = _clean_text_value(value)
 
@@ -243,11 +291,29 @@ def _clean_output_row(raw_values: dict[str, object], last_purchase_document: obj
 
 
 def _qualifies_for_output(row: dict[str, object]) -> bool:
-    return not any(row[header] is None for header in REQUIRED_HEADERS)
+    if any(row[header] is None for header in REQUIRED_HEADERS):
+        return False
+    delivery_date = row.get("Fecha de Entrega")
+    if pd.isna(delivery_date):
+        return False
+    return pd.Timestamp(delivery_date) >= MIN_DELIVERY_DATE
 
 
 def _missing_headers(selected_columns: dict[str, tuple[int, object]]) -> list[str]:
-    return [header for header in OUTPUT_HEADERS if header not in selected_columns]
+    return [header for header in SOURCE_HEADERS if header not in selected_columns]
+
+
+def _has_qualifying_delivery_date(ws, delivery_col_idx: int) -> bool:
+    for (value,) in ws.iter_rows(
+        min_row=2,
+        min_col=delivery_col_idx,
+        max_col=delivery_col_idx,
+        values_only=True,
+    ):
+        delivery_date = _clean_date_value(value)
+        if pd.notna(delivery_date) and pd.Timestamp(delivery_date) >= MIN_DELIVERY_DATE:
+            return True
+    return False
 
 
 def _stream_source_file(path: Path, operation: str) -> tuple[list[dict[str, object]], FileConsolidationStats]:
@@ -269,6 +335,8 @@ def _stream_source_file(path: Path, operation: str) -> tuple[list[dict[str, obje
         selected_columns = _selected_columns(header_row)
         missing = _missing_headers(selected_columns)
         missing_required = [header for header in REQUIRED_HEADERS if header in missing]
+        if "Fecha de Entrega" in missing:
+            missing_required.append("Fecha de Entrega")
         if missing_required:
             stat = FileConsolidationStats(
                 operation=operation,
@@ -281,10 +349,37 @@ def _stream_source_file(path: Path, operation: str) -> tuple[list[dict[str, obje
             )
             return [], stat
 
+        period_end = _period_end_from_filename(path)
+        if period_end is not None and period_end < MIN_DELIVERY_DATE:
+            stat = FileConsolidationStats(
+                operation=operation,
+                source_file=path.name,
+                rows_read=0,
+                rows_kept=0,
+                missing_headers=missing,
+                skipped=True,
+                skip_reason=f"File period ends before {MIN_DELIVERY_DATE.date()}",
+            )
+            return [], stat
+
+        delivery_col_idx = selected_columns["Fecha de Entrega"][0] + 1
+        if not _has_qualifying_delivery_date(ws, delivery_col_idx):
+            stat = FileConsolidationStats(
+                operation=operation,
+                source_file=path.name,
+                rows_read=0,
+                rows_kept=0,
+                missing_headers=missing,
+                skipped=True,
+                skip_reason=f"No rows with Fecha de Entrega >= {MIN_DELIVERY_DATE.date()}",
+            )
+            return [], stat
+
         kept_rows: list[dict[str, object]] = []
         rows_read = 0
         last_purchase_document = None
-        for row_values in ws.iter_rows(min_row=2, values_only=True):
+        max_selected_col = max(idx for idx, _ in selected_columns.values()) + 1
+        for row_values in ws.iter_rows(min_row=2, max_col=max_selected_col, values_only=True):
             if not _row_has_selected_values(row_values, selected_columns):
                 continue
             rows_read += 1
@@ -315,6 +410,7 @@ def consolidate_purchase_orders(inputs_root: Path, operations: list[str]) -> tup
     for operation in operations:
         op = operation.upper()
         for path in _excel_files(inputs_root, op):
+            print(f"  Leyendo [{op}] {path.name}")
             kept_rows, stat = _stream_source_file(path, op)
             rows.extend(kept_rows)
             stats.append(stat)
@@ -326,26 +422,54 @@ def consolidate_purchase_orders(inputs_root: Path, operations: list[str]) -> tup
     return combined[OUTPUT_HEADERS], stats
 
 
-def _write_headers(ws) -> None:
+def _enrich_with_usd_values(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    if CURRENCY_HEADER not in result.columns:
+        result[CURRENCY_HEADER] = None
+    if NET_ORDER_VALUE_HEADER not in result.columns:
+        result[NET_ORDER_VALUE_HEADER] = None
+
+    currency = result[CURRENCY_HEADER].apply(_clean_currency_value)
+    result[CURRENCY_HEADER] = currency
+    currencies = sorted({value for value in currency.dropna().unique() if value})
+    rates = load_usd_rates(currencies, DEFAULT_FX_RATES_PATH, FX_RATE_DATE)
+
+    result[USD_RATE_HEADER] = currency.map(rates)
+    net_value = pd.to_numeric(result[NET_ORDER_VALUE_HEADER], errors="coerce")
+    usd_rate = pd.to_numeric(result[USD_RATE_HEADER], errors="coerce")
+    result[NET_ORDER_VALUE_USD_HEADER] = net_value * usd_rate
+    return result[OUTPUT_HEADERS]
+
+
+def _write_headers(ws) -> list[int]:
     header_fill = PatternFill(start_color="1E3A5F", end_color="1E3A5F", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
+    widths: list[int] = []
+    cells = []
     for col_idx, header in enumerate(OUTPUT_HEADERS, 1):
-        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell = WriteOnlyCell(ws, value=header)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cells.append(cell)
+        widths.append(min(max(len(header) + 2, 10), 42))
+    ws.append(cells)
+    return widths
 
 
 def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "PO_2025plus"
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("PO_2025plus")
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(OUTPUT_HEADERS))}{max(len(df) + 1, 1)}"
+    ws.row_dimensions[1].height = 32
 
-    _write_headers(ws)
-    for row_idx, row in enumerate(df.itertuples(index=False, name=None), 2):
+    widths = _write_headers(ws)
+    for row in df.itertuples(index=False, name=None):
+        cells = []
         for col_idx, value in enumerate(row, 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
+            cell = WriteOnlyCell(ws)
             if pd.isna(value):
                 cell.value = None
             elif OUTPUT_HEADERS[col_idx - 1] in DATE_HEADERS:
@@ -353,25 +477,24 @@ def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
                 cell.number_format = "DD-MM-YYYY"
             elif OUTPUT_HEADERS[col_idx - 1] in NUMERIC_HEADERS:
                 cell.value = value
-                cell.number_format = "#,##0.00"
+                cell.number_format = NUMERIC_FORMATS.get(OUTPUT_HEADERS[col_idx - 1], "#,##0.00")
             else:
                 cell.value = value
             cell.alignment = Alignment(vertical="center")
-
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(OUTPUT_HEADERS))}{max(len(df) + 1, 1)}"
-    ws.row_dimensions[1].height = 32
-    for column in ws.columns:
-        width = 10
-        for cell in column:
             if cell.value is not None:
-                width = max(width, min(len(str(cell.value)) + 2, 42))
-        ws.column_dimensions[get_column_letter(column[0].column)].width = width
+                widths[col_idx - 1] = max(widths[col_idx - 1], min(len(str(cell.value)) + 2, 42))
+            cells.append(cell)
+        ws.append(cells)
+
+    for col_idx, width in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     wb.save(output_path)
 
 
 def build_po_consolidation(inputs_root: Path, output_path: Path, operations: list[str]) -> ConsolidationResult:
     df, stats = consolidate_purchase_orders(inputs_root, operations)
+    df = _enrich_with_usd_values(df)
+    print(f"  Escribiendo workbook: {output_path} ({len(df):,} filas)")
     _write_excel(df, output_path)
     return ConsolidationResult(output_path=output_path, dataframe=df, file_stats=stats)
