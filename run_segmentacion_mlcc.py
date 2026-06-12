@@ -20,7 +20,10 @@ sys.path.insert(0, str(ROOT))
 from src.lineage.records import FieldLineageRecord, StageManifest
 from src.material_crossref.enrichment import enrich_material_rows
 from src.material_crossref.loader import load_material_master
+from src.ordenes_compra.exchange_rates import load_usd_rates
+from src.output.complementaria_report import generate_complementaria_report
 from src.output.control_point import export_control_point
+from src.segmentacion.rules.group3.m01 import apply as _apply_m01
 from src.output.deliverable import export_deliverable
 from src.profiling.profiler import DataProfiler
 from src.rules.engine import RuleEngine
@@ -34,7 +37,7 @@ DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "control_points"
 DEFAULT_ENTREGABLES_DIR = ROOT / "outputs" / "entregables"
 DEFAULT_CACHE_DIR = ROOT / "tmp" / "cache" / "segmentacion_mlcc"
 LEGACY_OUTPUT_DIR = ROOT / "outputs" / "segmentacion_mlcc"
-CACHE_VERSION = "2026-06-08-v1"
+CACHE_VERSION = "2026-06-10-v1"
 LEGACY_ROOT_CONTROL_POINTS = (
     "C1_MLCC.xlsx",
     "C2_MLCC.xlsx",
@@ -61,6 +64,8 @@ CONTROL_POINT_COLUMNS = [
     "delivery_date",
     "validity_end",
     "deletion_flag",
+    "migration_category",
+    "delivery_year",
 ]
 
 
@@ -375,6 +380,21 @@ def _load_e01_config() -> dict:
     return {}
 
 
+def _load_m01_config() -> dict:
+    with open(RULES_YAML, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    for rule in cfg["groups"]["G3_MARKING"]["rules"]:
+        if rule["id"] == "M01":
+            return rule.get("config", {})
+    return {}
+
+
+def _load_complementaria_report_config() -> dict:
+    with open(RULES_YAML, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    return cfg.get("complementaria_report", {})
+
+
 def _vencidos_con_saldo_pendiente(df: pd.DataFrame, e01_config: dict) -> pd.DataFrame:
     """Return rows that are past the cutoff date but still carry a pending delivery balance.
 
@@ -410,7 +430,8 @@ def _apply_migration_rules(df: pd.DataFrame, operation: str) -> tuple[pd.DataFra
     engine = RuleEngine(SegmentRuleSettings())
     df_g1, g1_issues, g1_manifest = engine.apply_group("G1_EXCLUSIONS", df, operation)
     df_g2, g2_issues, g2_manifest = engine.apply_group("G2_RESCUE", df_g1, operation)
-    return df_g2, g1_issues + g2_issues, [g1_manifest, g2_manifest]
+    df_g3, g3_issues, g3_manifest = engine.apply_group("G3_MARKING", df_g2, operation)
+    return df_g3, g1_issues + g2_issues + g3_issues, [g1_manifest, g2_manifest, g3_manifest]
 
 
 def run(
@@ -437,6 +458,52 @@ def run(
     if enrich_materials:
         master, material_manifest = _load_material_enrichment_cached(master, operation, load_result, use_cache=use_cache)
         manifests.append(material_manifest)
+
+    # --- Load COMPLEMENTARIA config and apply M01 to the FULL OC universe BEFORE segmentation.
+    # The segmentation only classifies ~11k rows (all type D), so per-segment M01 would only
+    # ever see D rows. Applying here gives correct coverage: all 369k+ non-D rows for MLCC.
+    m01_config = _load_m01_config()
+    comp_report_cfg = _load_complementaria_report_config()
+    reportes_dir = output_dir.parent / comp_report_cfg.get("output_subdir", "reportes")
+    comp_enabled = comp_report_cfg.get("enabled", {})
+    if isinstance(comp_enabled, dict):
+        comp_enabled = comp_enabled.get(operation, True)
+
+    if comp_enabled and m01_config:
+        m01_result = _apply_m01(master, operation, m01_config)
+        for col, series in m01_result.updates.items():
+            master[col] = series.values
+        cat_col = m01_config.get("output_column", "migration_category")
+        if cat_col in master.columns:
+            cat_counts = master[cat_col].value_counts()
+            print(
+                f"Complementaria {operation} universo completo OC: "
+                + " | ".join(f"{cat}={cnt:,}" for cat, cnt in cat_counts.items()),
+                flush=True,
+            )
+        # Fetch USD exchange rates for value conversion (graceful fallback if network unavailable)
+        usd_rates: dict = {}
+        try:
+            _fx_cache = ROOT / "tmp" / "cache" / "exchange_rates.json"
+            usd_rates = load_usd_rates(
+                master.get("currency", []),
+                cache_path=_fx_cache,
+                as_of_date=datetime.now().strftime("%Y-%m-%d"),
+            )
+            print(f"Tasas USD cargadas para: {', '.join(sorted(usd_rates))}", flush=True)
+        except Exception as exc:
+            print(f"Advertencia: no se pudieron cargar tasas USD ({exc}). Reporte sin columnas USD.", flush=True)
+
+        comp_path = generate_complementaria_report(
+            segment_id=operation.lower(),
+            label=f"Universo OC {operation}",
+            df=master,
+            m01_config=m01_config,
+            output_dir=reportes_dir,
+            usd_rates=usd_rates,
+        )
+        if comp_path:
+            print(f"Reporte complementaria: {comp_path.relative_to(ROOT).as_posix()}", flush=True)
 
     segment_priority = _segment_priority(operation)
     print("Segmentando universo OC...", flush=True)

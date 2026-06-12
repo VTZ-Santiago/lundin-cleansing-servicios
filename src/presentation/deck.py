@@ -100,6 +100,29 @@ class TempOCSnapshot:
     without_material_ls: int = 0
 
 
+@dataclass
+class ComplementariaData:
+    operation: str
+    vigente_rows: int = 0
+    vigente_usd: float = 0.0
+    vcs_rows: int = 0
+    vcs_usd: float = 0.0
+    vss_rows: int = 0
+    prefix_counts: dict[str, int] = field(default_factory=dict)
+    con_material: int = 0
+    sin_material: int = 0
+
+
+@dataclass
+class PlantRow:
+    planta: str
+    vigente_filas: int = 0
+    vigente_usd: float = 0.0
+    vcs_filas: int = 0
+    vcs_usd: float = 0.0
+    vss_filas: int = 0
+
+
 def _as_text(value: object) -> str:
     if value is None:
         return ""
@@ -413,6 +436,114 @@ def _load_temp_snapshot(path: Path, operation: str) -> TempOCSnapshot:
                 current_type = ""
 
     return snapshot
+
+
+def _load_complementaria_data(output_root: Path, operation: str) -> ComplementariaData:
+    data = ComplementariaData(operation=operation)
+    pattern = f"reportes/complementaria_{operation.lower()}_*.xlsx"
+    candidates = sorted(
+        output_root.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return data
+
+    workbook = load_workbook(candidates[0], read_only=True, data_only=True)
+
+    if "Resumen" in workbook.sheetnames:
+        ws = workbook["Resumen"]
+        headers = [_as_text(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+        # Row 2 is always TOTAL (first entry in plant list)
+        total_vals = [ws.cell(2, c).value for c in range(1, ws.max_column + 1)]
+        for idx, hdr in enumerate(headers):
+            val = total_vals[idx]
+            if hdr == "VIGENTE — filas":
+                data.vigente_rows = _as_int(val)
+            elif hdr == "VIGENTE — valor USD":
+                data.vigente_usd = _as_float(val)
+            elif hdr == "NO_VIGENTE_CON_SALDO — filas":
+                data.vcs_rows = _as_int(val)
+            elif hdr == "NO_VIGENTE_CON_SALDO — valor USD":
+                data.vcs_usd = _as_float(val)
+            elif hdr == "NO_VIGENTE_SIN_SALDO — filas":
+                data.vss_rows = _as_int(val)
+
+    if "Apertura_Codigo" in workbook.sheetnames:
+        ws2 = workbook["Apertura_Codigo"]
+        headers2 = [_as_text(ws2.cell(1, c).value) for c in range(1, ws2.max_column + 1)]
+        _skip = {"Categoría", "Total filas", "Valor pendiente", "Valor USD", "Con material", "Sin material", ""}
+        for row in range(2, ws2.max_row + 1):
+            if _as_text(ws2.cell(row, 1).value) == "TOTAL":
+                row_vals = [ws2.cell(row, c).value for c in range(1, ws2.max_column + 1)]
+                for idx, hdr in enumerate(headers2):
+                    val = row_vals[idx]
+                    if hdr == "Con material":
+                        data.con_material = _as_int(val)
+                    elif hdr == "Sin material":
+                        data.sin_material = _as_int(val)
+                    elif hdr not in _skip:
+                        data.prefix_counts[hdr] = _as_int(val)
+                break
+
+    workbook.close()
+    return data
+
+
+def _load_complementaria_plants(output_root: Path, operation: str) -> list[PlantRow]:
+    pattern = f"reportes/complementaria_{operation.lower()}_*.xlsx"
+    candidates = sorted(
+        output_root.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return []
+
+    workbook = load_workbook(candidates[0], read_only=True, data_only=True)
+    if "Resumen" not in workbook.sheetnames:
+        workbook.close()
+        return []
+
+    ws = workbook["Resumen"]
+    headers = [_as_text(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+
+    col_planta = col_vig_f = col_vig_usd = col_vcs_f = col_vcs_usd = col_vss_f = None
+    for idx, hdr in enumerate(headers):
+        if hdr == "Planta":
+            col_planta = idx
+        elif hdr == "VIGENTE — filas":
+            col_vig_f = idx
+        elif hdr == "VIGENTE — valor USD":
+            col_vig_usd = idx
+        elif hdr == "NO_VIGENTE_CON_SALDO — filas":
+            col_vcs_f = idx
+        elif hdr == "NO_VIGENTE_CON_SALDO — valor USD":
+            col_vcs_usd = idx
+        elif hdr == "NO_VIGENTE_SIN_SALDO — filas":
+            col_vss_f = idx
+
+    if col_planta is None:
+        workbook.close()
+        return []
+
+    rows = []
+    for row in range(2, ws.max_row + 1):
+        vals = [ws.cell(row, c).value for c in range(1, ws.max_column + 1)]
+        planta = _as_text(vals[col_planta])
+        if not planta:
+            continue
+        rows.append(PlantRow(
+            planta=planta,
+            vigente_filas=_as_int(vals[col_vig_f]) if col_vig_f is not None else 0,
+            vigente_usd=_as_float(vals[col_vig_usd]) if col_vig_usd is not None else 0.0,
+            vcs_filas=_as_int(vals[col_vcs_f]) if col_vcs_f is not None else 0,
+            vcs_usd=_as_float(vals[col_vcs_usd]) if col_vcs_usd is not None else 0.0,
+            vss_filas=_as_int(vals[col_vss_f]) if col_vss_f is not None else 0,
+        ))
+
+    workbook.close()
+    return rows
 
 
 def _find_blank_layout(prs: Presentation):
@@ -896,6 +1027,200 @@ def _add_segment_counts_slide(prs: Presentation, mlcc_summary: OperationSummary,
     _add_footnote(slide, "Fuentes: resúmenes de segmentación vigentes por operación.")
 
 
+def _add_complementaria_slide(
+    prs: Presentation,
+    mlcc_data: ComplementariaData,
+    ccmc_data: ComplementariaData,
+) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+
+    total_vigente = mlcc_data.vigente_rows + ccmc_data.vigente_rows
+    total_vcs = mlcc_data.vcs_rows + ccmc_data.vcs_rows
+    total_vss = mlcc_data.vss_rows + ccmc_data.vss_rows
+    total_vigente_usd = mlcc_data.vigente_usd + ccmc_data.vigente_usd
+    total_vcs_usd = mlcc_data.vcs_usd + ccmc_data.vcs_usd
+
+    def _fmt_usd(value: float) -> str:
+        if value <= 0.0:
+            return "—"
+        if value >= 1_000_000:
+            return f"USD {value / 1_000_000:.1f}M"
+        if value >= 1_000:
+            return f"USD {value / 1_000:.0f}K"
+        return f"USD {value:.0f}"
+
+    _add_header(
+        slide,
+        prs.slide_width,
+        "COMPLEMENTARIA — Universo no tipificado como D",
+        "Tipos de posición C, V, K, L, P y en blanco — segmentados por vigencia y saldo pendiente (cutoff: 30 Jun 2026)",
+    )
+
+    # KPI cards
+    _add_card(slide, 0.78, 2.0, 3.72, 1.3, "VIGENTE", _format_int(total_vigente), f"Deben migrar  ·  {_fmt_usd(total_vigente_usd)}", GREEN_LIGHT, GREEN)
+    _add_card(slide, 4.72, 2.0, 3.72, 1.3, "NO VIGENTE c/ saldo", _format_int(total_vcs), f"No vigentes con balance  ·  {_fmt_usd(total_vcs_usd)}", ORANGE_LIGHT, ORANGE)
+    _add_card(slide, 8.66, 2.0, 3.89, 1.3, "NO VIGENTE s/ saldo", _format_int(total_vss), "No vigentes sin balance — NO migran", RED_LIGHT, RED)
+
+    # Table: per operation
+    rows = [
+        ["Operación", "VIGENTE", "VIGENTE USD", "NVCS filas", "NVCS USD", "NVSS filas"],
+        [
+            "MLCC",
+            _format_int(mlcc_data.vigente_rows),
+            _fmt_usd(mlcc_data.vigente_usd),
+            _format_int(mlcc_data.vcs_rows),
+            _fmt_usd(mlcc_data.vcs_usd),
+            _format_int(mlcc_data.vss_rows),
+        ],
+        [
+            "CCMC",
+            _format_int(ccmc_data.vigente_rows),
+            _fmt_usd(ccmc_data.vigente_usd),
+            _format_int(ccmc_data.vcs_rows),
+            _fmt_usd(ccmc_data.vcs_usd),
+            _format_int(ccmc_data.vss_rows),
+        ],
+        [
+            "TOTAL",
+            _format_int(total_vigente),
+            _fmt_usd(total_vigente_usd),
+            _format_int(total_vcs),
+            _fmt_usd(total_vcs_usd),
+            _format_int(total_vss),
+        ],
+    ]
+    _add_table(slide, rows, 0.78, 3.55, 11.44, 1.85, [1.25, 1.65, 2.0, 1.55, 2.0, 1.55])
+
+    # Callout: document prefix breakdown
+    all_prefix_labels = ["46XXXX (Marco)", "45XXXX", "44XXXX", "49XXXX", "Otros"]
+
+    def _pfx(data: ComplementariaData, lbl: str) -> str:
+        return _format_int(data.prefix_counts.get(lbl, 0))
+
+    lines = [
+        "46XXXX (Marco) — MLCC: {m46}  |  CCMC: {c46}".format(
+            m46=_pfx(mlcc_data, "46XXXX (Marco)"), c46=_pfx(ccmc_data, "46XXXX (Marco)")
+        ),
+        (
+            "45XXXX — MLCC: {m45} | CCMC: {c45}   ·   "
+            "44XXXX — MLCC: {m44} | CCMC: {c44}   ·   "
+            "49XXXX — MLCC: {m49} | CCMC: {c49}   ·   "
+            "Otros — MLCC: {mot} | CCMC: {cot}"
+        ).format(
+            m45=_pfx(mlcc_data, "45XXXX"), c45=_pfx(ccmc_data, "45XXXX"),
+            m44=_pfx(mlcc_data, "44XXXX"), c44=_pfx(ccmc_data, "44XXXX"),
+            m49=_pfx(mlcc_data, "49XXXX"), c49=_pfx(ccmc_data, "49XXXX"),
+            mot=_pfx(mlcc_data, "Otros"),  cot=_pfx(ccmc_data, "Otros"),
+        ),
+        (
+            "Con material — MLCC: {mc} | CCMC: {cc}   ·   "
+            "Sin material — MLCC: {ms} | CCMC: {cs}"
+        ).format(
+            mc=_format_int(mlcc_data.con_material), cc=_format_int(ccmc_data.con_material),
+            ms=_format_int(mlcc_data.sin_material), cs=_format_int(ccmc_data.sin_material),
+        ),
+    ]
+    _add_callout_box(slide, 0.78, 5.55, 11.44, 1.2, "Apertura por código de documento de compra", lines, GRAY_LIGHT, CHARCOAL, font_size=9)
+
+    _add_footnote(slide, "Fuente: reportes complementaria más recientes en outputs/reportes/.  Cutoff vigencia: 30 Jun 2026.")
+
+
+def _add_complementaria_plant_slide(prs: Presentation, operation: str, plant_rows: list[PlantRow]) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        f"{operation} | Complementaria — Apertura por Planta",
+        "Posiciones no tipificadas como D, segmentadas por vigencia y saldo pendiente (cutoff: 30 Jun 2026)",
+    )
+
+    def _fmt_usd(value: float) -> str:
+        if value <= 0.0:
+            return "—"
+        if value >= 1_000_000:
+            return f"USD {value / 1_000_000:.1f}M"
+        if value >= 1_000:
+            return f"USD {value / 1_000:.0f}K"
+        return f"USD {value:.0f}"
+
+    total_row = next((r for r in plant_rows if r.planta == "TOTAL"), None)
+
+    def _sort_key(r: PlantRow) -> tuple:
+        if r.vigente_filas > 0:
+            return (0, -(r.vigente_filas + r.vcs_filas))
+        if r.vcs_filas > 0:
+            return (1, -r.vcs_filas)
+        return (2, -r.vss_filas)
+
+    plant_data = sorted(
+        [r for r in plant_rows if r.planta != "TOTAL"],
+        key=_sort_key,
+    )
+
+    ordered: list[tuple[PlantRow, bool]] = []  # (row, is_total)
+    if total_row:
+        ordered.append((total_row, True))
+    ordered.extend((r, False) for r in plant_data)
+
+    n_rows = 1 + len(ordered)
+    tbl_height = min(5.1, max(1.2, n_rows * 0.26))
+    font_size = 8 if len(plant_data) > 10 else 10
+
+    col_widths = [1.3, 1.65, 2.2, 1.65, 2.2, 2.44]  # 11.44 total
+
+    table = slide.shapes.add_table(
+        n_rows, 6, Inches(0.78), Inches(1.9), Inches(11.44), Inches(tbl_height)
+    ).table
+
+    for idx, cw in enumerate(col_widths):
+        table.columns[idx].width = Inches(cw)
+
+    for c_idx, hdr_text in enumerate(["Planta", "VIGENTE", "VIGENTE USD", "NVCS filas", "NVCS USD", "NVSS filas"]):
+        cell = table.cell(0, c_idx)
+        cell.text = hdr_text
+        cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+        para = cell.text_frame.paragraphs[0]
+        para.alignment = PP_ALIGN.LEFT if c_idx == 0 else PP_ALIGN.CENTER
+        for run in para.runs:
+            run.font.size = Pt(9)
+            run.font.bold = True
+            run.font.color.rgb = RGBColor(255, 255, 255)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = ORANGE
+
+    for r_idx, (row_data, is_total) in enumerate(ordered):
+        row_index = r_idx + 1
+        no_migra = not is_total and row_data.vigente_filas == 0 and row_data.vcs_filas == 0
+        base_bg = GRAY_LIGHT if row_index % 2 else RGBColor(255, 255, 255)
+
+        row_cells = [
+            row_data.planta,
+            _format_int(row_data.vigente_filas),
+            _fmt_usd(row_data.vigente_usd),
+            _format_int(row_data.vcs_filas),
+            _fmt_usd(row_data.vcs_usd),
+            _format_int(row_data.vss_filas),
+        ]
+
+        for c_idx, val in enumerate(row_cells):
+            cell = table.cell(row_index, c_idx)
+            cell.text = val
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            para = cell.text_frame.paragraphs[0]
+            para.alignment = PP_ALIGN.LEFT if c_idx == 0 else PP_ALIGN.CENTER
+            for run in para.runs:
+                run.font.size = Pt(font_size)
+                run.font.bold = is_total or c_idx == 5
+                run.font.color.rgb = CHARCOAL
+            cell.fill.solid()
+            if no_migra and c_idx in (4, 5):
+                cell.fill.fore_color.rgb = RED_LIGHT
+            else:
+                cell.fill.fore_color.rgb = base_bg
+
+    _add_footnote(slide, "Fuente: reporte complementaria más reciente en outputs/reportes/.  Cutoff vigencia: 30 Jun 2026.")
+
+
 def generate_project_presentation(
     template_path: Path,
     output_path: Path,
@@ -917,6 +1242,10 @@ def generate_project_presentation(
     ccmc_stats = _load_po_stats(ccmc_stats_path, "CCMC")
     mlcc_tmp = _load_temp_snapshot(tmp_stats_path, "MLCC")
     ccmc_tmp = _load_temp_snapshot(tmp_stats_path, "CCMC")
+    mlcc_comp = _load_complementaria_data(output_root, "MLCC")
+    ccmc_comp = _load_complementaria_data(output_root, "CCMC")
+    mlcc_plants = _load_complementaria_plants(output_root, "MLCC")
+    ccmc_plants = _load_complementaria_plants(output_root, "CCMC")
 
     for index in range(len(prs.slides) - 1, 0, -1):
         _delete_slide(prs, index)
@@ -926,7 +1255,9 @@ def generate_project_presentation(
     _add_universe_slide(prs, mlcc_stats, ccmc_stats)
     _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT)
     _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT)
-    _add_segment_counts_slide(prs, mlcc_summary, ccmc_summary)
+    _add_complementaria_slide(prs, mlcc_comp, ccmc_comp)
+    _add_complementaria_plant_slide(prs, "MLCC", mlcc_plants)
+    _add_complementaria_plant_slide(prs, "CCMC", ccmc_plants)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(output_path))

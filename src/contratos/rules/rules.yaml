@@ -95,6 +95,31 @@ groups:
         config:
           disabled_reason: "No existe campo Supply Option y la tarea implica acción SAP posterior."
 
+      - id: CMP01
+        name: "Categorizar contratos COMPLEMENTARIA (no-D) por estado de migración"
+        enabled: {MLCC: true}
+        priority: 99
+        severity: INFO
+        action: MARK
+        config:
+          cutoff_date: "2026-06-30"
+          primary_date_column: "validity_end"
+          fallback_date_column: "validity_end"
+          value_column: "pending_planned_qty"
+          excluded_position_types: ["D"]
+          output_column: "migration_category"
+          year_column: "delivery_year"
+          category_vigente: "VIGENTE"
+          category_vencido_con_saldo: "NO_VIGENTE_CON_SALDO"
+          category_vencido_sin_saldo: "NO_VIGENTE_SIN_SALDO"
+          category_excluded_type: "TIPO_D"
+
+complementaria_report:
+  enabled: {MLCC: true}
+  output_subdir: "reportes"
+  group_by_plant: true
+  vencido_con_saldo_by_year: true
+
 reporting:
   profiling_summary:
     - id: C01

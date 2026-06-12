@@ -45,6 +45,8 @@ EXTRA_RAW_TO_CANONICAL = {
     "Fecha de término": "validity_end",
     "Validity Period End": "validity_end",
     "Acct Assignment Cat.": "account_assignment_type",
+    "Moneda": "currency",
+    "Currency": "currency",
 }
 
 RAW_HEADER_PRIORITY: dict[str, int] = {
@@ -66,6 +68,7 @@ RAW_HEADER_OCCURRENCE_PRIORITY: dict[tuple[str, int], int] = {
 
 WANTED_CANONICAL_COLUMNS = {
     "account_assignment_type",
+    "currency",
     "deletion_flag",
     "delivery_date",
     "document_date",

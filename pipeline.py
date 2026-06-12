@@ -7,6 +7,8 @@ from src.config.settings import Settings
 from src.ingestion.assembler import DomainAssembler
 from src.lineage.records import FieldLineageRecord, StageManifest
 from src.material_crossref.enrichment import enrich_material_rows, load_reference_tables
+from src.ordenes_compra.exchange_rates import load_usd_rates
+from src.output.complementaria_report import generate_complementaria_report
 from src.output.control_point import export_control_point
 from src.output.stats_report import generate_stats_report
 from src.profiling.profiler import DataProfiler
@@ -198,6 +200,50 @@ def run(
         cp2_name = "(omitido por --skip-control-points)"
         cp3_name = "(omitido por --skip-control-points)"
         log.info("  Control points finales omitidos por --skip-control-points")
+
+    # --- Complementaria report (non-D positions by migration category and plant) ---
+    import yaml as _yaml
+    with open(settings.rules_yaml_path, encoding="utf-8") as _f:
+        _rules_cfg = _yaml.safe_load(_f)
+    _comp_report_cfg = _rules_cfg.get("complementaria_report", {})
+    _comp_enabled = _comp_report_cfg.get("enabled", {})
+    if isinstance(_comp_enabled, dict):
+        _comp_enabled = _comp_enabled.get(operation.upper(), False)
+    _cmp01_config: dict = {}
+    for _rule in _rules_cfg.get("groups", {}).get("G3_MARKING", {}).get("rules", []):
+        if _rule.get("id") == "CMP01":
+            _cmp01_config = _rule.get("config", {})
+            break
+    if _comp_enabled and _cmp01_config:
+        _cat_col = _cmp01_config.get("output_column", "migration_category")
+        if _cat_col in df_g3.columns:
+            _cat_counts = df_g3[_cat_col].value_counts()
+            log.info(
+                "  Complementaria %s: %s",
+                operation,
+                " | ".join(f"{cat}={cnt:,}" for cat, cnt in _cat_counts.items()),
+            )
+        _reportes_dir = settings.domain_outputs_dir / _comp_report_cfg.get("output_subdir", "reportes")
+        _usd_rates: dict = {}
+        try:
+            _fx_cache = settings.project_root / "tmp" / "cache" / "exchange_rates.json"
+            _usd_rates = load_usd_rates(
+                df_g3.get("currency", []),
+                cache_path=_fx_cache,
+                as_of_date=datetime.now().strftime("%Y-%m-%d"),
+            )
+        except Exception as _exc:
+            log.warning("  Tasas USD no disponibles (%s). Reporte sin columnas USD.", _exc)
+        _comp_path = generate_complementaria_report(
+            segment_id=domain_cfg.package_name,
+            label=domain_cfg.display_name,
+            df=df_g3,
+            m01_config=_cmp01_config,
+            output_dir=_reportes_dir,
+            usd_rates=_usd_rates,
+        )
+        if _comp_path:
+            log.info("  Reporte complementaria: %s", _comp_path.name)
 
     # --- Summary ---
     reconciliation_ok = len(master) == len(df_no_migra) + len(df_migra)

@@ -14,11 +14,19 @@ API_CURRENCY_ALIASES = {
 }
 
 
+_NULL_CURRENCY_STRINGS = frozenset({"NAN", "NONE", "N/A", "NA", "NAT", "NULL", ""})
+
+
 def _normalize_currency(value: object) -> str | None:
     if value is None:
         return None
+    # pandas NA, float NaN
+    if isinstance(value, float) and value != value:
+        return None
     text = str(value).strip().upper()
-    return text or None
+    if text in _NULL_CURRENCY_STRINGS:
+        return None
+    return text
 
 
 def _load_cached_rates(cache_path: Path, as_of_date: str) -> dict[str, float]:

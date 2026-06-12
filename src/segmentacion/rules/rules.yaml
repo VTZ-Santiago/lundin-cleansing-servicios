@@ -23,9 +23,33 @@ groups:
     rules: []
 
   G3_MARKING:
-    name: "Grupo 3 — Marcas segmentación"
+    name: "Grupo 3 — Marcas complementaria"
     control_point_out: C2
-    rules: []
+    rules:
+      - id: M01
+        name: "Categorizar filas por estado de migración (vigente / vencido con saldo / vencido sin saldo)"
+        enabled: {MLCC: true, CCMC: true}
+        priority: 1
+        severity: INFO
+        action: MARK
+        config:
+          cutoff_date: "2026-06-30"
+          primary_date_column: "delivery_date"
+          fallback_date_column: "validity_end"
+          value_column: "pending_delivery_value"
+          excluded_position_types: ["D"]
+          output_column: "migration_category"
+          year_column: "delivery_year"
+          category_vigente: "VIGENTE"
+          category_vencido_con_saldo: "NO_VIGENTE_CON_SALDO"
+          category_vencido_sin_saldo: "NO_VIGENTE_SIN_SALDO"
+          category_excluded_type: "TIPO_D"
+
+complementaria_report:
+  enabled: {MLCC: true, CCMC: true}
+  output_subdir: "reportes"
+  group_by_plant: true
+  vencido_con_saldo_by_year: true
 
 reporting:
   profiling_summary:
