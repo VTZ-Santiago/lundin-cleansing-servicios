@@ -12,6 +12,8 @@ from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Inches, Pt
 
+from src.segmentacion.characterization import load_segment_rules
+
 
 ORANGE = RGBColor.from_string("F97316")
 ORANGE_LIGHT = RGBColor.from_string("FFF7ED")
@@ -123,6 +125,13 @@ class PlantRow:
     vss_filas: int = 0
 
 
+@dataclass
+class SegmentCriteria:
+    position_type: str = ""
+    marco: str = ""
+    doc_classes: list[str] = field(default_factory=list)
+
+
 def _as_text(value: object) -> str:
     if value is None:
         return ""
@@ -167,6 +176,10 @@ def _as_float(value: object) -> float:
 
 def _format_int(value: int) -> str:
     return f"{value:,}".replace(",", ".")
+
+
+def _format_pct(value: float) -> str:
+    return f"{value:.1f}%".replace(".", ",")
 
 
 def _month_name_es(value: date) -> str:
@@ -546,6 +559,61 @@ def _load_complementaria_plants(output_root: Path, operation: str) -> list[Plant
     return rows
 
 
+def _load_characterization_criteria(project_root: Path) -> dict[str, SegmentCriteria]:
+    candidates = sorted((project_root / "tmp").glob("Car*.xlsx"))
+    if not candidates:
+        return {}
+
+    try:
+        rules = load_segment_rules(candidates[0])
+    except Exception:
+        return {}
+
+    criteria: dict[str, SegmentCriteria] = {}
+    for rule in rules:
+        entry = criteria.setdefault(rule.segment_id, SegmentCriteria())
+        for condition in rule.conditions:
+            if condition.column == "position_type" and condition.operator == "equals":
+                entry.position_type = condition.value
+            elif condition.column == "outline_contract":
+                entry.marco = "con contrato marco" if condition.operator == "present" else "sin contrato marco"
+            elif (
+                condition.column == "purchase_doc_class"
+                and condition.operator == "equals"
+                and condition.value not in entry.doc_classes
+            ):
+                entry.doc_classes.append(condition.value)
+
+    for entry in criteria.values():
+        entry.doc_classes.sort()
+    return criteria
+
+
+def _characterization_lines(criteria: dict[str, SegmentCriteria]) -> list[str]:
+    lines: list[str] = []
+    for segment_id, label in (("contratos", "Contratos"), ("ordenes_servicio", "Órdenes de Servicio")):
+        entry = criteria.get(segment_id)
+        if entry is None:
+            continue
+        parts = [f"tipo posición {entry.position_type or 'D'}"]
+        if entry.marco:
+            parts.append(entry.marco)
+        if entry.doc_classes:
+            parts.append("clases: " + ", ".join(entry.doc_classes))
+        lines.append(f"{label} — " + " · ".join(parts))
+
+    if not lines:
+        lines = [
+            "Contratos — tipo posición D · con contrato marco",
+            "Órdenes de Servicio — tipo posición D · sin contrato marco",
+        ]
+    lines.append(
+        "Criterios de la hoja CASERONES (planta 8000); en CCMC la apertura usa la presencia de contrato marco. "
+        "Bloque de órdenes de servicio de reparación (tipo L) excluido."
+    )
+    return lines
+
+
 def _find_blank_layout(prs: Presentation):
     for layout in prs.slide_layouts:
         if layout.name.strip().lower() in {"blank", "en blanco"}:
@@ -583,7 +651,7 @@ def _update_cover_slide(slide, generated_on: date) -> None:
     subtitle_frame.word_wrap = True
     paragraph = subtitle_frame.paragraphs[0]
     run = paragraph.add_run()
-    run.text = "Hallazgos vigentes sobre órdenes de compra, contratos y servicios"
+    run.text = "Hallazgos vigentes sobre órdenes de compra, contratos y órdenes de servicio"
     run.font.size = Pt(18)
     run.font.color.rgb = CHARCOAL
 
@@ -902,8 +970,8 @@ def _add_findings_slide(
     )
     _add_card(slide, 0.78, 2.05, 5.45, 1.75, "Posiciones de OC", _format_int(total_positions), "Cobertura combinada 2007-2026 en MLCC y CCMC", BLUE_LIGHT, BLUE)
     _add_card(slide, 6.55, 2.05, 5.95, 1.75, "OC con contrato marco", _format_int(total_framework), f"{_format_int(ccmc_stats.po_with_framework)} CCMC | {_format_int(mlcc_stats.po_with_framework)} MLCC", GREEN_LIGHT, GREEN)
-    _add_card(slide, 0.78, 4.2, 5.45, 1.75, "Posiciones segmentadas", _format_int(total_segmented), f"{_format_int(contracts_total)} contratos | {_format_int(services_total)} servicios", ORANGE_LIGHT, ORANGE)
-    _add_card(slide, 6.55, 4.2, 5.95, 1.75, "Base MLCC sin servicios", _format_int(mlcc_tmp.total_base), f"{_format_int(mlcc_tmp.type_counts.get('Vacio', 0))} registros sin tipo de posición", PURPLE_LIGHT, PURPLE)
+    _add_card(slide, 0.78, 4.2, 5.45, 1.75, "Posiciones segmentadas", _format_int(total_segmented), f"{_format_int(contracts_total)} contratos | {_format_int(services_total)} órdenes de servicio", ORANGE_LIGHT, ORANGE)
+    _add_card(slide, 6.55, 4.2, 5.95, 1.75, "Base MLCC sin posiciones D", _format_int(mlcc_tmp.total_base), f"{_format_int(mlcc_tmp.type_counts.get('Vacio', 0))} registros sin tipo de posición", PURPLE_LIGHT, PURPLE)
     _add_footnote(slide, "Fuentes: reporte estadístico de OC, resúmenes de segmentación y estadística ad hoc de OC.")
 
 
@@ -950,7 +1018,7 @@ def _operation_callout_lines(stats: POStats, snapshot: TempOCSnapshot) -> list[s
     if stats.operation == "MLCC":
         top_framework = stats.top_frameworks[0] if stats.top_frameworks else ("Sin dato", 0, 0)
         return [
-            f"Estadística ad hoc sin servicios: {_format_int(snapshot.total_base)} registros",
+            f"Estadística ad hoc sin posiciones D: {_format_int(snapshot.total_base)} registros",
             f"Con código material: {_format_int(snapshot.with_material)} | Sin código material: {_format_int(snapshot.without_material)}",
             f"Marco con mayor volumen: {top_framework[0]} con {_format_int(top_framework[1])} OC asociadas",
         ]
@@ -994,37 +1062,108 @@ def _add_operation_structure_slide(prs: Presentation, stats: POStats, snapshot: 
     _add_footnote(slide, f"Fuentes: reporte_estadistico_{stats.operation}-PO.xlsx y tmp/Estadistica de OC.xlsx.")
 
 
-def _add_segment_counts_slide(prs: Presentation, mlcc_summary: OperationSummary, ccmc_summary: OperationSummary) -> None:
+def _segment_table_row(operation: str, label: str, segment: SegmentStats) -> list[str]:
+    return [
+        operation,
+        label,
+        _format_int(segment.c1_rows),
+        _format_int(segment.c2_rows),
+        _format_int(segment.c2_no_migra_rows),
+        _format_pct(segment.excluded_pct),
+        _format_int(segment.c1_documents),
+    ]
+
+
+def _add_servicios_slide(
+    prs: Presentation,
+    mlcc_summary: OperationSummary,
+    ccmc_summary: OperationSummary,
+    criteria: dict[str, SegmentCriteria],
+) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
     mlcc_contracts = _get_segment(mlcc_summary, "Contrato")
     mlcc_services = _get_segment(mlcc_summary, "Servicio")
     ccmc_contracts = _get_segment(ccmc_summary, "Contrato")
     ccmc_services = _get_segment(ccmc_summary, "Servicio")
-    total_segmented = mlcc_summary.classified_rows + ccmc_summary.classified_rows
+    segments = [mlcc_contracts, mlcc_services, ccmc_contracts, ccmc_services]
+
+    total_c1 = sum(segment.c1_rows for segment in segments)
+    total_c2 = sum(segment.c2_rows for segment in segments)
+    total_no_migra = sum(segment.c2_no_migra_rows for segment in segments)
     total_contracts = mlcc_contracts.c1_rows + ccmc_contracts.c1_rows
     total_services = mlcc_services.c1_rows + ccmc_services.c1_rows
+    pct_no_migra = (total_no_migra / total_c1 * 100) if total_c1 else 0.0
 
     _add_header(
         slide,
         prs.slide_width,
-        "Conteos segmentados por dominio",
-        "Se muestran solo conteos absolutos de contratos y servicios; esta versión deja fuera los porcentajes.",
+        "CONTRATOS Y ÓRDENES DE SERVICIO — Universo tipificado como D",
+        "Vigencia por cruce con los reportes de contratos vigentes (contrato marco o documento de compra) — corte 30 Jun 2026 (E01)",
     )
-    _add_card(slide, 0.78, 2.0, 3.15, 1.35, "Posiciones segmentadas", _format_int(total_segmented), "Contratos y servicios clasificados", BLUE_LIGHT, BLUE)
-    _add_card(slide, 4.08, 2.0, 3.15, 1.35, "Contratos", _format_int(total_contracts), "Posiciones base C1", GREEN_LIGHT, GREEN)
-    _add_card(slide, 7.38, 2.0, 4.84, 1.35, "Servicios", _format_int(total_services), "Posiciones base C1 en órdenes de servicio", ORANGE_LIGHT, ORANGE)
+    _add_card(
+        slide, 0.78, 2.0, 3.72, 1.3,
+        "Posiciones D segmentadas",
+        _format_int(total_c1),
+        f"Contratos {_format_int(total_contracts)} | Órdenes de servicio {_format_int(total_services)}",
+        BLUE_LIGHT, BLUE,
+    )
+    _add_card(
+        slide, 4.72, 2.0, 3.72, 1.3,
+        "C2 — migra",
+        _format_int(total_c2),
+        f"MLCC {_format_int(mlcc_contracts.c2_rows + mlcc_services.c2_rows)} | CCMC {_format_int(ccmc_contracts.c2_rows + ccmc_services.c2_rows)}",
+        GREEN_LIGHT, GREEN,
+    )
+    _add_card(
+        slide, 8.66, 2.0, 3.89, 1.3,
+        "C2 — no migra",
+        _format_int(total_no_migra),
+        f"{_format_pct(pct_no_migra)} del universo D segmentado",
+        RED_LIGHT, RED,
+    )
 
     rows = [
-        ["Operación", "Dominio", "Posiciones base", "C2", "C2 no migra", "Docs únicos"],
-        ["MLCC", "Contratos", _format_int(mlcc_contracts.c1_rows), _format_int(mlcc_contracts.c2_rows), _format_int(mlcc_contracts.c2_no_migra_rows), _format_int(mlcc_contracts.c1_documents)],
-        ["MLCC", "Servicios", _format_int(mlcc_services.c1_rows), _format_int(mlcc_services.c2_rows), _format_int(mlcc_services.c2_no_migra_rows), _format_int(mlcc_services.c1_documents)],
-        ["CCMC", "Contratos", _format_int(ccmc_contracts.c1_rows), _format_int(ccmc_contracts.c2_rows), _format_int(ccmc_contracts.c2_no_migra_rows), _format_int(ccmc_contracts.c1_documents)],
-        ["CCMC", "Servicios", _format_int(ccmc_services.c1_rows), _format_int(ccmc_services.c2_rows), _format_int(ccmc_services.c2_no_migra_rows), _format_int(ccmc_services.c1_documents)],
+        ["Operación", "Segmento", "Posiciones C1", "C2 migra", "C2 no migra", "% no migra", "Docs únicos"],
+        _segment_table_row("MLCC", "Contratos", mlcc_contracts),
+        _segment_table_row("MLCC", "Órdenes de Servicio", mlcc_services),
+        _segment_table_row("CCMC", "Contratos", ccmc_contracts),
+        _segment_table_row("CCMC", "Órdenes de Servicio", ccmc_services),
     ]
-    _add_table(slide, rows, 0.78, 3.7, 11.45, 2.35, [1.25, 2.2, 1.55, 1.15, 1.85, 1.55])
-    _add_callout_box(slide, 0.78, 6.3, 5.55, 0.52, "MLCC", [f"Solapamientos detectados en el resumen actual: {_format_int(mlcc_summary.overlap_rows)}"], BLUE_LIGHT, BLUE, font_size=10)
-    _add_callout_box(slide, 6.68, 6.3, 5.55, 0.52, "CCMC", ["Sin solapamientos en el resumen actual."], GREEN_LIGHT, GREEN, font_size=10)
-    _add_footnote(slide, "Fuentes: resúmenes de segmentación vigentes por operación.")
+    _add_table(slide, rows, 0.78, 3.55, 11.44, 1.85, [1.15, 2.35, 1.65, 1.45, 1.65, 1.5, 1.69])
+
+    _add_callout_box(
+        slide, 0.78, 5.55, 11.44, 1.2,
+        "Caracterización aplicada al universo D",
+        _characterization_lines(criteria),
+        GRAY_LIGHT, CHARCOAL, font_size=9,
+    )
+    _add_footnote(
+        slide,
+        "Fuentes: resúmenes de segmentación, Caracterización de Contratos.xlsx (bloque de reparación excluido) "
+        "y reportes CONTRATOS VIGENTES (CCMC mayo 26 | MLCC abril 26).",
+    )
+
+
+def _add_servicios_doc_class_slide(prs: Presentation, mlcc_summary: OperationSummary, ccmc_summary: OperationSummary) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        "CONTRATOS Y ÓRDENES DE SERVICIO — Apertura por clase documental",
+        "Posiciones C1 del universo D por clase de documento de compras y segmento.",
+    )
+
+    boxes = [
+        (0.78, 2.0, 5.65, "MLCC — Contratos", _get_segment(mlcc_summary, "Contrato"), BLUE_LIGHT, BLUE),
+        (6.6, 2.0, 5.62, "MLCC — Órdenes de Servicio", _get_segment(mlcc_summary, "Servicio"), BLUE_LIGHT, BLUE),
+        (0.78, 4.5, 5.65, "CCMC — Contratos", _get_segment(ccmc_summary, "Contrato"), GREEN_LIGHT, GREEN),
+        (6.6, 4.5, 5.62, "CCMC — Órdenes de Servicio", _get_segment(ccmc_summary, "Servicio"), GREEN_LIGHT, GREEN),
+    ]
+    for left, top, width, title, segment, fill, accent in boxes:
+        items = sorted(segment.doc_class_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+        _add_bar_box(slide, left, top, width, 2.3, title, items, fill, accent)
+
+    _add_footnote(slide, "Fuente: resúmenes de segmentación vigentes por operación (conteo de posiciones C1).")
 
 
 def _add_complementaria_slide(
@@ -1246,6 +1385,7 @@ def generate_project_presentation(
     ccmc_comp = _load_complementaria_data(output_root, "CCMC")
     mlcc_plants = _load_complementaria_plants(output_root, "MLCC")
     ccmc_plants = _load_complementaria_plants(output_root, "CCMC")
+    characterization = _load_characterization_criteria(project_root)
 
     for index in range(len(prs.slides) - 1, 0, -1):
         _delete_slide(prs, index)
@@ -1255,6 +1395,8 @@ def generate_project_presentation(
     _add_universe_slide(prs, mlcc_stats, ccmc_stats)
     _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT)
     _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT)
+    _add_servicios_slide(prs, mlcc_summary, ccmc_summary, characterization)
+    _add_servicios_doc_class_slide(prs, mlcc_summary, ccmc_summary)
     _add_complementaria_slide(prs, mlcc_comp, ccmc_comp)
     _add_complementaria_plant_slide(prs, "MLCC", mlcc_plants)
     _add_complementaria_plant_slide(prs, "CCMC", ccmc_plants)

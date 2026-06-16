@@ -4,15 +4,19 @@ groups:
     control_point_out: C2
     rules:
       - id: E01
-        name: "Excluir registros con fecha efectiva <= 2026-06-30, sin saldo pendiente o con indicador de borrado"
+        name: "Excluir registros sin contrato vigente (fin de contrato <= 2026-06-30 o sin cruce), sin saldo pendiente o con indicador de borrado"
         enabled: {MLCC: true, CCMC: true}
         priority: 1
         severity: ERROR
         action: EXCLUDE
         config:
           cutoff_date: "2026-06-30"
-          primary_date_column: "delivery_date"
-          fallback_date_column: "validity_end"
+          # Vigencia tomada del cruce con los reportes CONTRATOS VIGENTES
+          # (contrato marco; en su defecto documento de compra). Sin fallback a
+          # fechas de la base OC y sin cruce => no vigente.
+          primary_date_column: "contract_end_date"
+          fallback_date_column: ""
+          missing_date_means_expired: true
           pending_qty_column: "pending_delivery_qty"
           pending_value_column: "pending_delivery_value"
           deletion_flag_column: "deletion_flag"

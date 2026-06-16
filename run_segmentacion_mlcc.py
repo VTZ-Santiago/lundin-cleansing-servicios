@@ -28,6 +28,8 @@ from src.output.deliverable import export_deliverable
 from src.profiling.profiler import DataProfiler
 from src.rules.engine import RuleEngine
 from src.segmentacion.characterization import SegmentRule, load_segment_rules
+from src.segmentacion.contract_validity import apply_contract_validity, load_vigentes_index
+from src.segmentacion.rules.group1.e01 import before_cutoff_mask
 from src.segmentacion.po_loader import PurchaseOrderLoadResult, load_purchase_orders
 from src.segmentacion.report import build_segment_summary, write_summary_markdown
 from src.segmentacion.segments import SEGMENT_LABELS, segment_dataframe
@@ -63,6 +65,8 @@ CONTROL_POINT_COLUMNS = [
     "document_date",
     "delivery_date",
     "validity_end",
+    "contract_end_date",
+    "contract_match_source",
     "deletion_flag",
     "migration_category",
     "delivery_year",
@@ -396,32 +400,19 @@ def _load_complementaria_report_config() -> dict:
 
 
 def _vencidos_con_saldo_pendiente(df: pd.DataFrame, e01_config: dict) -> pd.DataFrame:
-    """Return rows that are past the cutoff date but still carry a pending delivery balance.
+    """Return rows without a vigente contract that still carry a pending delivery balance.
 
     These records are already excluded (they land in C2_NO_MIGRA), but the combination
-    of an expired delivery date with outstanding balance may warrant follow-up.
+    of an expired/missing contract with outstanding balance may warrant follow-up.
+    Uses the same expiry mask as E01 (cruce de vigencia incluido).
     """
-    cutoff_raw = e01_config.get("cutoff_date")
-    if not cutoff_raw:
-        return df.iloc[:0].copy()
-
-    cutoff = pd.to_datetime(cutoff_raw, errors="coerce")
-    if pd.isna(cutoff):
-        return df.iloc[:0].copy()
-
-    primary_col = e01_config.get("primary_date_column", "delivery_date")
-    fallback_col = e01_config.get("fallback_date_column", "validity_end")
     qty_col = e01_config.get("pending_qty_column", "pending_delivery_qty")
     value_col = e01_config.get("pending_value_column", "pending_delivery_value")
-
-    primary = pd.to_datetime(df.get(primary_col, pd.Series(pd.NaT, index=df.index)), errors="coerce")
-    fallback = pd.to_datetime(df.get(fallback_col, pd.Series(pd.NaT, index=df.index)), errors="coerce")
-    effective_date = primary.fillna(fallback)
 
     pending_qty = pd.to_numeric(df.get(qty_col, pd.Series(0, index=df.index)), errors="coerce").fillna(0)
     pending_value = pd.to_numeric(df.get(value_col, pd.Series(0, index=df.index)), errors="coerce").fillna(0)
 
-    expired = effective_date.notna() & effective_date.le(cutoff)
+    expired = before_cutoff_mask(df, e01_config)
     has_balance = (pending_qty > 0) | (pending_value > 0)
     return df[expired & has_balance].copy()
 
@@ -534,12 +525,27 @@ def run(
     e01_config = _load_e01_config()
     entregables_dir = output_dir.parent / "entregables"
 
+    vigentes_index = load_vigentes_index(operation, ROOT / "inputs")
+    print(
+        f"Reporte de contratos vigentes {operation}: {vigentes_index.source_file} | "
+        + " | ".join(f"{sheet}: {count:,}" for sheet, count in vigentes_index.sheet_counts.items())
+        + f" | claves totales: {vigentes_index.total_keys:,}",
+        flush=True,
+    )
+
     summaries = []
     for segment_id in sorted(segments):
         label = SEGMENT_LABELS.get(segment_id, segment_id)
         c1 = segments[segment_id]
         segment_output_dir = output_dir / segment_id
         print(f"Procesando segmento {operation} {label}: C1={len(c1):,}", flush=True)
+
+        c1, cruce_stats = apply_contract_validity(c1, vigentes_index)
+        print(
+            f"  Cruce vigencia {label}: por marco={cruce_stats['by_contract']:,} | "
+            f"por documento={cruce_stats['by_document']:,} | sin cruce={cruce_stats['sin_cruce']:,}",
+            flush=True,
+        )
 
         if export_control_points:
             _export_cp(
