@@ -4,7 +4,7 @@ Fuentes por operación:
   CCMC — inputs/CONTRATOS VIGENTES CCMC <MES> <AA>.xlsx
     - Hoja "Report Cttos Vigentes": contratos marco (46*) con FIN CTTO SAP (fallback Fin (Orden)).
     - Hoja "Report Pedidos": documentos de compra (45*, tipos Ctto y OST) con columna Fin.
-  MLCC — inputs/MLCC/contratos/CONTRATOS VIGENTES MLCC <MES> <AA>.xlsx
+  MLCC — inputs/MLCC/CONTRATOS VIGENTES MLCC <MES> <AA>.xlsx
     - Hoja "CONSOL": contratos marco (46*) y contratos-documento (51/52/53/54*) con Fin período validez.
 
 Clave de cruce por fila OC: outline_contract si existe; si no, purchase_document.
@@ -127,7 +127,11 @@ def _latest_file(directory: Path, pattern: str) -> Path:
 def load_vigentes_index(operation: str, inputs_dir: Path) -> VigentesIndex:
     operation = operation.upper()
     if operation == "CCMC":
-        path = _latest_file(inputs_dir, "CONTRATOS VIGENTES CCMC*.xlsx")
+        pattern = "CONTRATOS VIGENTES CCMC*.xlsx"
+        if list((inputs_dir / "CCMC").glob(pattern)):
+            path = _latest_file(inputs_dir / "CCMC", pattern)
+        else:
+            path = _latest_file(inputs_dir, pattern)
         workbook = load_workbook(path, read_only=True, data_only=True)
         try:
             marcos = _load_sheet_dates(
@@ -149,7 +153,7 @@ def load_vigentes_index(operation: str, inputs_dir: Path) -> VigentesIndex:
         return index
 
     if operation == "MLCC":
-        path = _latest_file(inputs_dir / "MLCC" / "contratos", "CONTRATOS VIGENTES MLCC*.xlsx")
+        path = _latest_file(inputs_dir / "MLCC", "CONTRATOS VIGENTES MLCC*.xlsx")
         workbook = load_workbook(path, read_only=True, data_only=True)
         try:
             consol = _load_sheet_dates(
