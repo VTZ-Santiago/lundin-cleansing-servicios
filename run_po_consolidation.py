@@ -46,7 +46,7 @@ def _selected_operations(value: str) -> list[str]:
 
 
 def _default_output_path(operation: str) -> Path:
-    return DEFAULT_OUTPUT_DIR / f"po_consolidado_{operation}_2025plus.xlsx"
+    return DEFAULT_OUTPUT_DIR / f"po_consolidado_{operation}.xlsx"
 
 
 def _resolve_output_path(output: Path | None, operation: str, multiple: bool) -> Path:
@@ -56,13 +56,13 @@ def _resolve_output_path(output: Path | None, operation: str, multiple: bool) ->
         return output
     if output.suffix.lower() == ".xlsx":
         return output.with_name(f"{output.stem}_{operation}{output.suffix}")
-    return output / f"po_consolidado_{operation}_2025plus.xlsx"
+    return output / f"po_consolidado_{operation}.xlsx"
 
 
 def _print_summary(result, operation: str) -> None:
     print()
     print("=" * 72)
-    print(f"  CONSOLIDADO PO {operation} 2025+ -- RESUMEN")
+    print(f"  CONSOLIDADO PO {operation} -- RESUMEN")
     print("=" * 72)
     print(f"  Filas leidas      : {result.rows_read:>10,}")
     print(f"  Filas retenidas   : {result.rows_kept:>10,}")
@@ -91,8 +91,11 @@ def main() -> None:
         for operation in operations
     ]
 
-    if LEGACY_OUTPUT.exists() and LEGACY_OUTPUT not in output_paths:
-        LEGACY_OUTPUT.unlink()
+    # Limpia nombres antiguos (2026plus / *_2025plus*) que ya no se generan.
+    legacy_files = [LEGACY_OUTPUT, *DEFAULT_OUTPUT_DIR.glob("po_consolidado_*_2025plus*.xlsx")]
+    for legacy in legacy_files:
+        if legacy.exists() and legacy not in output_paths and not legacy.name.startswith("~$"):
+            legacy.unlink()
 
     for operation, output_path in zip(operations, output_paths):
         result = build_po_consolidation(INPUTS_ROOT, output_path, [operation])

@@ -18,7 +18,8 @@ NET_ORDER_VALUE_HEADER = "Valor neto de pedido"
 CURRENCY_HEADER = "Moneda"
 USD_RATE_HEADER = f"Tasa cambio USD ({FX_RATE_DATE})"
 NET_ORDER_VALUE_USD_HEADER = "Valor neto de pedido USD"
-DERIVED_HEADERS = {USD_RATE_HEADER, NET_ORDER_VALUE_USD_HEADER}
+VIGENCIA_DATE_HEADER = "Fecha vigencia"
+DERIVED_HEADERS = {USD_RATE_HEADER, NET_ORDER_VALUE_USD_HEADER, VIGENCIA_DATE_HEADER}
 DEFAULT_FX_RATES_PATH = Path(__file__).resolve().parents[2] / "resources" / f"fx_rates_{FX_RATE_DATE}.json"
 
 
@@ -43,10 +44,11 @@ OUTPUT_HEADERS: list[str] = [
     "Fecha documento",
     "Fecha de Entrega",
     "Fecha de Termino",
+    VIGENCIA_DATE_HEADER,
     "Indicador de borrado",
 ]
 
-DATE_HEADERS = ["Fecha documento", "Fecha de Entrega", "Fecha de Termino"]
+DATE_HEADERS = ["Fecha documento", "Fecha de Entrega", "Fecha de Termino", VIGENCIA_DATE_HEADER]
 ID_HEADERS = ["PR/SOLPED", "Contrato Marco", "Documento compras", "Posición", "Material"]
 NUMERIC_HEADERS = [
     "Por entregar (cantidad)",
@@ -291,12 +293,9 @@ def _clean_output_row(raw_values: dict[str, object], last_purchase_document: obj
 
 
 def _qualifies_for_output(row: dict[str, object]) -> bool:
-    if any(row[header] is None for header in REQUIRED_HEADERS):
-        return False
-    delivery_date = row.get("Fecha de Entrega")
-    if pd.isna(delivery_date):
-        return False
-    return pd.Timestamp(delivery_date) >= MIN_DELIVERY_DATE
+    # Sin filtro de vigencia ni de fecha: el consolidado lleva TODOS los documentos.
+    # Solo se exige la clave estructural (documento de compra + posicion).
+    return not any(row[header] is None for header in REQUIRED_HEADERS)
 
 
 def _missing_headers(selected_columns: dict[str, tuple[int, object]]) -> list[str]:
@@ -335,8 +334,6 @@ def _stream_source_file(path: Path, operation: str) -> tuple[list[dict[str, obje
         selected_columns = _selected_columns(header_row)
         missing = _missing_headers(selected_columns)
         missing_required = [header for header in REQUIRED_HEADERS if header in missing]
-        if "Fecha de Entrega" in missing:
-            missing_required.append("Fecha de Entrega")
         if missing_required:
             stat = FileConsolidationStats(
                 operation=operation,
@@ -346,32 +343,6 @@ def _stream_source_file(path: Path, operation: str) -> tuple[list[dict[str, obje
                 missing_headers=missing,
                 skipped=True,
                 skip_reason=f"Missing required headers: {', '.join(missing_required)}",
-            )
-            return [], stat
-
-        period_end = _period_end_from_filename(path)
-        if period_end is not None and period_end < MIN_DELIVERY_DATE:
-            stat = FileConsolidationStats(
-                operation=operation,
-                source_file=path.name,
-                rows_read=0,
-                rows_kept=0,
-                missing_headers=missing,
-                skipped=True,
-                skip_reason=f"File period ends before {MIN_DELIVERY_DATE.date()}",
-            )
-            return [], stat
-
-        delivery_col_idx = selected_columns["Fecha de Entrega"][0] + 1
-        if not _has_qualifying_delivery_date(ws, delivery_col_idx):
-            stat = FileConsolidationStats(
-                operation=operation,
-                source_file=path.name,
-                rows_read=0,
-                rows_kept=0,
-                missing_headers=missing,
-                skipped=True,
-                skip_reason=f"No rows with Fecha de Entrega >= {MIN_DELIVERY_DATE.date()}",
             )
             return [], stat
 
@@ -460,7 +431,7 @@ def _write_headers(ws) -> list[int]:
 def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb = Workbook(write_only=True)
-    ws = wb.create_sheet("PO_2025plus")
+    ws = wb.create_sheet("Consolidado")
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = f"A1:{get_column_letter(len(OUTPUT_HEADERS))}{max(len(df) + 1, 1)}"
     ws.row_dimensions[1].height = 32
@@ -492,9 +463,30 @@ def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
     wb.save(output_path)
 
 
+def _derive_vigencia_date(df: pd.DataFrame, operations: list[str]) -> pd.DataFrame:
+    """Fecha de referencia del consolidado.
+
+    MLCC: fecha de entrega con fallback a fin de periodo de validez.
+    CCMC (y otros): el export no trae entrega ni periodo de validez, por lo que
+    se usa la fecha de documento (unica fecha poblada).
+    """
+    result = df.copy()
+    op = operations[0].upper() if len(operations) == 1 else ""
+    entrega = pd.to_datetime(result.get("Fecha de Entrega"), errors="coerce")
+    termino = pd.to_datetime(result.get("Fecha de Termino"), errors="coerce")
+    documento = pd.to_datetime(result.get("Fecha documento"), errors="coerce")
+    if op == "MLCC":
+        vigencia = entrega.fillna(termino).fillna(documento)
+    else:
+        vigencia = termino.fillna(documento)
+    result[VIGENCIA_DATE_HEADER] = vigencia
+    return result
+
+
 def build_po_consolidation(inputs_root: Path, output_path: Path, operations: list[str]) -> ConsolidationResult:
     df, stats = consolidate_purchase_orders(inputs_root, operations)
     df = _enrich_with_usd_values(df)
+    df = _derive_vigencia_date(df, operations)
     print(f"  Escribiendo workbook: {output_path} ({len(df):,} filas)")
     _write_excel(df, output_path)
     return ConsolidationResult(output_path=output_path, dataframe=df, file_stats=stats)

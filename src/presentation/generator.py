@@ -278,7 +278,7 @@ def _load_dup_check_card(folder: Path) -> ArtifactCard:
 
 def _load_consolidated_card(folder: Path) -> ArtifactCard:
     workbooks = sorted(
-        [path for path in folder.glob("*2025plus.xlsx") if not path.name.startswith("~$")],
+        [path for path in folder.glob("po_consolidado_*.xlsx") if not path.name.startswith("~$")],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
