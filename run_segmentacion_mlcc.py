@@ -341,8 +341,9 @@ def _drop_rule_conditions(
 
 
 def _segment_priority(operation: str) -> list[str] | None:
-    if operation.upper() == "MLCC":
-        return ["ordenes_servicio", "contratos"]
+    # Sin prioridad: las filas que caen en ambos segmentos (p.ej. clase ZADI)
+    # se conservan DUPLICADAS en contratos y en ordenes_servicio. Requiere
+    # ejecutar con allow_overlap=True para no abortar por el solape.
     return None
 
 

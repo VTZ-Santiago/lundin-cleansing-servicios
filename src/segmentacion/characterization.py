@@ -34,7 +34,10 @@ IGNORED_SEGMENTATION_COLUMNS = {
     "validity_end",
 }
 
-PRESENCE_TOKENS = {"SI", "SÍ"}
+# "TAL VEZ": el contrato marco puede o no estar; para SEGMENTAR cuenta como
+# presencia (CCMC contratos exige marco). El fallback marco->documento de compra
+# para la vigencia lo resuelve contract_validity, no la segmentación.
+PRESENCE_TOKENS = {"SI", "SÍ", "TAL VEZ"}
 ABSENCE_TOKENS = {"NO"}
 SKIP_SECTION = "__skip_section__"
 
