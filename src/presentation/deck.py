@@ -1062,108 +1062,189 @@ def _add_operation_structure_slide(prs: Presentation, stats: POStats, snapshot: 
     _add_footnote(slide, f"Fuentes: reporte_estadistico_{stats.operation}-PO.xlsx y tmp/Estadistica de OC.xlsx.")
 
 
-def _segment_table_row(operation: str, label: str, segment: SegmentStats) -> list[str]:
-    return [
-        operation,
-        label,
-        _format_int(segment.c1_rows),
-        _format_int(segment.c2_rows),
-        _format_int(segment.c2_no_migra_rows),
-        _format_pct(segment.excluded_pct),
-        _format_int(segment.c1_documents),
-    ]
+def _segment_title(slide, left: float, top: float, width: float, text: str, accent: RGBColor) -> None:
+    box = slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(0.4))
+    frame = box.text_frame
+    frame.clear()
+    paragraph = frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = text
+    run.font.size = Pt(20)
+    run.font.bold = True
+    run.font.color.rgb = accent
 
 
-def _add_servicios_slide(
-    prs: Presentation,
-    mlcc_summary: OperationSummary,
-    ccmc_summary: OperationSummary,
-    criteria: dict[str, SegmentCriteria],
+def _add_metric_panel(
+    slide,
+    left: float,
+    top: float,
+    width: float,
+    height: float,
+    title: str,
+    value: str,
+    note: str,
+    fill: RGBColor,
+    accent: RGBColor,
+    value_pt: int = 34,
 ) -> None:
-    slide = prs.slides.add_slide(_find_blank_layout(prs))
-    mlcc_contracts = _get_segment(mlcc_summary, "Contrato")
-    mlcc_services = _get_segment(mlcc_summary, "Servicio")
-    ccmc_contracts = _get_segment(ccmc_summary, "Contrato")
-    ccmc_services = _get_segment(ccmc_summary, "Servicio")
-    segments = [mlcc_contracts, mlcc_services, ccmc_contracts, ccmc_services]
+    shape = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
+        Inches(left), Inches(top), Inches(width), Inches(height),
+    )
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = fill
+    shape.line.color.rgb = accent
+    shape.line.width = Pt(1.5)
 
-    total_c1 = sum(segment.c1_rows for segment in segments)
-    total_c2 = sum(segment.c2_rows for segment in segments)
-    total_no_migra = sum(segment.c2_no_migra_rows for segment in segments)
-    total_contracts = mlcc_contracts.c1_rows + ccmc_contracts.c1_rows
-    total_services = mlcc_services.c1_rows + ccmc_services.c1_rows
-    pct_no_migra = (total_no_migra / total_c1 * 100) if total_c1 else 0.0
+    title_box = slide.shapes.add_textbox(Inches(left + 0.22), Inches(top + 0.13), Inches(width - 0.44), Inches(0.3))
+    title_frame = title_box.text_frame
+    title_frame.clear()
+    paragraph = title_frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = title
+    run.font.size = Pt(15)
+    run.font.bold = True
+    run.font.color.rgb = accent
+
+    value_box = slide.shapes.add_textbox(Inches(left + 0.22), Inches(top + 0.45), Inches(width - 0.44), Inches(0.62))
+    value_frame = value_box.text_frame
+    value_frame.clear()
+    paragraph = value_frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = value
+    run.font.size = Pt(value_pt)
+    run.font.bold = True
+    run.font.color.rgb = CHARCOAL
+
+    if note:
+        note_box = slide.shapes.add_textbox(Inches(left + 0.22), Inches(top + height - 0.4), Inches(width - 0.44), Inches(0.34))
+        note_frame = note_box.text_frame
+        note_frame.clear()
+        note_frame.word_wrap = True
+        paragraph = note_frame.paragraphs[0]
+        run = paragraph.add_run()
+        run.text = note
+        run.font.size = Pt(12)
+        run.font.color.rgb = SLATE
+
+
+def _add_step_box(slide, left: float, top: float, width: float, height: float, number: str, text: str, fill: RGBColor, accent: RGBColor) -> None:
+    shape = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
+        Inches(left), Inches(top), Inches(width), Inches(height),
+    )
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = fill
+    shape.line.color.rgb = accent
+    shape.line.width = Pt(1.2)
+
+    num_box = slide.shapes.add_textbox(Inches(left + 0.18), Inches(top), Inches(0.7), Inches(height))
+    num_frame = num_box.text_frame
+    num_frame.clear()
+    num_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    paragraph = num_frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = number
+    run.font.size = Pt(28)
+    run.font.bold = True
+    run.font.color.rgb = accent
+
+    text_box = slide.shapes.add_textbox(Inches(left + 0.95), Inches(top), Inches(width - 1.15), Inches(height))
+    text_frame = text_box.text_frame
+    text_frame.clear()
+    text_frame.word_wrap = True
+    text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    paragraph = text_frame.paragraphs[0]
+    run = paragraph.add_run()
+    run.text = text
+    run.font.size = Pt(15)
+    run.font.color.rgb = CHARCOAL
+
+
+def _add_flow_slide(prs: Presentation, mlcc_summary: OperationSummary, ccmc_summary: OperationSummary) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    contracts = _get_segment(mlcc_summary, "Contrato").c1_rows + _get_segment(ccmc_summary, "Contrato").c1_rows
+    services = _get_segment(mlcc_summary, "Servicio").c1_rows + _get_segment(ccmc_summary, "Servicio").c1_rows
+    total_seg = contracts + services
+    total_migra = sum(
+        seg.c2_rows
+        for summary in (mlcc_summary, ccmc_summary)
+        for seg in (_get_segment(summary, "Contrato"), _get_segment(summary, "Servicio"))
+    )
 
     _add_header(
         slide,
         prs.slide_width,
-        "CONTRATOS Y ÓRDENES DE SERVICIO — Universo tipificado como D",
-        "Vigencia por cruce con los reportes de contratos vigentes (contrato marco o documento de compra) — corte 30 Jun 2026 (E01)",
+        "Contratos y Órdenes de Servicio — Cómo se obtienen",
+        "Mismo flujo para MLCC y CCMC; los resultados por operación van en las láminas siguientes.",
     )
+
+    steps = [
+        ("1", "Se cargan las órdenes de compra de todos los períodos de MLCC y CCMC."),
+        ("2", "Se separan las posiciones de servicio en dos grupos: Contratos (con contrato marco) y Órdenes de Servicio (sin marco)."),
+        ("3", "Cada posición se cruza con el reporte de contratos vigentes — por contrato marco o, si no hay, por documento de compra (CCMC: mayo 2026 · MLCC: abril 2026)."),
+        ("4", "Lo que tiene contrato vigente migra a SAP; lo vencido o sin contrato vigente no migra."),
+    ]
+    for (number, text), top in zip(steps, (1.95, 2.82, 3.69, 4.56)):
+        _add_step_box(slide, 0.78, top, 11.45, 0.78, number, text, GRAY_LIGHT, ORANGE)
+
     _add_card(
-        slide, 0.78, 2.0, 3.72, 1.3,
-        "Posiciones D segmentadas",
-        _format_int(total_c1),
-        f"Contratos {_format_int(total_contracts)} | Órdenes de servicio {_format_int(total_services)}",
+        slide, 0.78, 5.58, 5.6, 1.15,
+        "Posiciones segmentadas", _format_int(total_seg),
+        f"Contratos {_format_int(contracts)} | Órdenes de servicio {_format_int(services)}",
         BLUE_LIGHT, BLUE,
     )
     _add_card(
-        slide, 4.72, 2.0, 3.72, 1.3,
-        "C2 — migra",
-        _format_int(total_c2),
-        f"MLCC {_format_int(mlcc_contracts.c2_rows + mlcc_services.c2_rows)} | CCMC {_format_int(ccmc_contracts.c2_rows + ccmc_services.c2_rows)}",
+        slide, 6.63, 5.58, 5.6, 1.15,
+        "Migran a SAP", _format_int(total_migra),
+        "Posiciones con contrato vigente al corte (30 jun 2026)",
         GREEN_LIGHT, GREEN,
-    )
-    _add_card(
-        slide, 8.66, 2.0, 3.89, 1.3,
-        "C2 — no migra",
-        _format_int(total_no_migra),
-        f"{_format_pct(pct_no_migra)} del universo D segmentado",
-        RED_LIGHT, RED,
-    )
-
-    rows = [
-        ["Operación", "Segmento", "Posiciones C1", "C2 migra", "C2 no migra", "% no migra", "Docs únicos"],
-        _segment_table_row("MLCC", "Contratos", mlcc_contracts),
-        _segment_table_row("MLCC", "Órdenes de Servicio", mlcc_services),
-        _segment_table_row("CCMC", "Contratos", ccmc_contracts),
-        _segment_table_row("CCMC", "Órdenes de Servicio", ccmc_services),
-    ]
-    _add_table(slide, rows, 0.78, 3.55, 11.44, 1.85, [1.15, 2.35, 1.65, 1.45, 1.65, 1.5, 1.69])
-
-    _add_callout_box(
-        slide, 0.78, 5.55, 11.44, 1.2,
-        "Caracterización aplicada al universo D",
-        _characterization_lines(criteria),
-        GRAY_LIGHT, CHARCOAL, font_size=9,
     )
     _add_footnote(
         slide,
-        "Fuentes: resúmenes de segmentación, Caracterización de Contratos.xlsx (bloque de reparación excluido) "
-        "y reportes CONTRATOS VIGENTES (CCMC mayo 26 | MLCC abril 26).",
+        "Fuentes: resúmenes de segmentación y reportes CONTRATOS VIGENTES (CCMC mayo 26 | MLCC abril 26).",
     )
 
 
-def _add_servicios_doc_class_slide(prs: Presentation, mlcc_summary: OperationSummary, ccmc_summary: OperationSummary) -> None:
+def _add_operation_results_slide(prs: Presentation, summary: OperationSummary, operation: str, accent: RGBColor, fill: RGBColor) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
+    contracts = _get_segment(summary, "Contrato")
+    services = _get_segment(summary, "Servicio")
+    mes = "mayo 2026" if operation.upper() == "CCMC" else "abril 2026"
+
     _add_header(
         slide,
         prs.slide_width,
-        "CONTRATOS Y ÓRDENES DE SERVICIO — Apertura por clase documental",
-        "Posiciones C1 del universo D por clase de documento de compras y segmento.",
+        f"{operation} — Contratos y Órdenes de Servicio",
+        f"Posiciones de servicio y su vigencia (cruce con contratos vigentes {mes}; corte 30 jun 2026).",
     )
 
-    boxes = [
-        (0.78, 2.0, 5.65, "MLCC — Contratos", _get_segment(mlcc_summary, "Contrato"), BLUE_LIGHT, BLUE),
-        (6.6, 2.0, 5.62, "MLCC — Órdenes de Servicio", _get_segment(mlcc_summary, "Servicio"), BLUE_LIGHT, BLUE),
-        (0.78, 4.5, 5.65, "CCMC — Contratos", _get_segment(ccmc_summary, "Contrato"), GREEN_LIGHT, GREEN),
-        (6.6, 4.5, 5.62, "CCMC — Órdenes de Servicio", _get_segment(ccmc_summary, "Servicio"), GREEN_LIGHT, GREEN),
+    columns = [
+        (0.78, "Contratos", contracts),
+        (6.85, "Órdenes de Servicio", services),
     ]
-    for left, top, width, title, segment, fill, accent in boxes:
-        items = sorted(segment.doc_class_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
-        _add_bar_box(slide, left, top, width, 2.3, title, items, fill, accent)
+    for left, title, segment in columns:
+        _segment_title(slide, left, 1.92, 5.62, title, accent)
+        _add_metric_panel(
+            slide, left, 2.34, 5.62, 1.4,
+            "Posiciones (C1)", _format_int(segment.c1_rows),
+            f"{_format_int(segment.c1_documents)} documentos únicos", fill, accent, value_pt=36,
+        )
+        _add_metric_panel(
+            slide, left, 3.82, 5.62, 1.4,
+            "Migran a SAP (C2)", _format_int(segment.c2_rows),
+            "Con contrato vigente", GREEN_LIGHT, GREEN, value_pt=32,
+        )
+        _add_metric_panel(
+            slide, left, 5.3, 5.62, 1.4,
+            "No migran", _format_int(segment.c2_no_migra_rows),
+            f"{_format_pct(segment.excluded_pct)} del segmento", RED_LIGHT, RED, value_pt=32,
+        )
 
-    _add_footnote(slide, "Fuente: resúmenes de segmentación vigentes por operación (conteo de posiciones C1).")
+    _add_footnote(
+        slide,
+        f"Fuente: resumen de segmentación {operation}. Las posiciones que caen en ambos segmentos (clase ZADI) se cuentan en cada uno.",
+    )
 
 
 def _add_complementaria_slide(
@@ -1385,7 +1466,6 @@ def generate_project_presentation(
     ccmc_comp = _load_complementaria_data(output_root, "CCMC")
     mlcc_plants = _load_complementaria_plants(output_root, "MLCC")
     ccmc_plants = _load_complementaria_plants(output_root, "CCMC")
-    characterization = _load_characterization_criteria(project_root)
 
     for index in range(len(prs.slides) - 1, 0, -1):
         _delete_slide(prs, index)
@@ -1395,8 +1475,9 @@ def generate_project_presentation(
     _add_universe_slide(prs, mlcc_stats, ccmc_stats)
     _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT)
     _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT)
-    _add_servicios_slide(prs, mlcc_summary, ccmc_summary, characterization)
-    _add_servicios_doc_class_slide(prs, mlcc_summary, ccmc_summary)
+    _add_flow_slide(prs, mlcc_summary, ccmc_summary)
+    _add_operation_results_slide(prs, ccmc_summary, "CCMC", GREEN, GREEN_LIGHT)
+    _add_operation_results_slide(prs, mlcc_summary, "MLCC", BLUE, BLUE_LIGHT)
     _add_complementaria_slide(prs, mlcc_comp, ccmc_comp)
     _add_complementaria_plant_slide(prs, "MLCC", mlcc_plants)
     _add_complementaria_plant_slide(prs, "CCMC", ccmc_plants)
