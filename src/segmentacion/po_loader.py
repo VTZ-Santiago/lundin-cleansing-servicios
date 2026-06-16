@@ -66,6 +66,19 @@ RAW_HEADER_OCCURRENCE_PRIORITY: dict[tuple[str, int], int] = {
     ("item category", 1): 10,
 }
 
+# SAP item-category internal code (PSTYP) -> external item category (EPSTP).
+# Newer ME2N exports populate the numeric internal code for "Tipo de posicion"
+# (0/2/3/9), whereas the segmentation rules and M01 marking key off the external
+# letter the legacy export produced ('D' = servicio). This reproduces that letter
+# from the numeric code; letter-coded exports (MLCC y formato anterior) no coinciden
+# con estas claves de dígito y pasan sin cambios.
+POSITION_TYPE_CODE_MAP = {
+    "0": "",   # estandar (legacy: vacio / NaN)
+    "2": "K",  # consignacion
+    "3": "L",  # subcontratacion
+    "9": "D",  # servicio
+}
+
 WANTED_CANONICAL_COLUMNS = {
     "account_assignment_type",
     "currency",
@@ -184,6 +197,16 @@ def _clean_text(value: object) -> object:
     return text
 
 
+def _normalize_position_type(value: object) -> object:
+    text = _clean_text(value)
+    if text is None:
+        return None
+    mapped = POSITION_TYPE_CODE_MAP.get(text)
+    if mapped is None:
+        return text
+    return mapped or None
+
+
 def _coerce_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
     for column in result.columns:
@@ -194,6 +217,8 @@ def _coerce_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             result[column] = pd.to_datetime(result[column], errors="coerce")
         elif dtype == "float":
             result[column] = pd.to_numeric(result[column], errors="coerce")
+        elif column == "position_type":
+            result[column] = result[column].map(_normalize_position_type)
         else:
             result[column] = result[column].map(_clean_text)
     return result
