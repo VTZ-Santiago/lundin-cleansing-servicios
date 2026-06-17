@@ -14,6 +14,11 @@ from src.ordenes_compra.exchange_rates import load_usd_rates
 
 FX_RATE_DATE = "2026-06-08"
 MIN_DELIVERY_DATE = pd.Timestamp("2025-01-01")
+# Maestro de contratos marco (ME3N). Solo se usa para ENRIQUECER el consolidado
+# (rellenar Fecha de Termino por contrato marco); no afecta entregables ni control points.
+MARCO_MASTER_SUBDIR = "contratos-marco-me3n"
+MARCO_MASTER_KEY_HEADERS = ["documento compras", "purchasing document", "contrato marco", "outline agreement"]
+MARCO_MASTER_DATE_HEADERS = ["fin periodo validez", "validity period end"]
 NET_ORDER_VALUE_HEADER = "Valor neto de pedido"
 CURRENCY_HEADER = "Moneda"
 USD_RATE_HEADER = f"Tasa cambio USD ({FX_RATE_DATE})"
@@ -463,6 +468,76 @@ def _write_excel(df: pd.DataFrame, output_path: Path) -> None:
     wb.save(output_path)
 
 
+def _load_marco_end_dates(inputs_root: Path, operation: str) -> dict[str, pd.Timestamp]:
+    """Mapa contrato marco -> fecha de fin de validez, desde el maestro ME3N.
+
+    Lee `inputs/<OP>/contratos-marco-me3n/*.xlsx`. La clave es el número de
+    contrato marco (en ME3N viene en 'Documento compras', 46*) y el valor es la
+    máxima 'Fin período validez' encontrada para ese marco. Devuelve {} si la
+    carpeta no existe (p. ej. MLCC), dejando el consolidado intacto.
+    """
+    directory = inputs_root / operation.upper() / MARCO_MASTER_SUBDIR
+    if not directory.exists():
+        return {}
+    files = [
+        path
+        for path in list(directory.glob("*.XLSX")) + list(directory.glob("*.xlsx"))
+        if not path.name.startswith("~$")
+    ]
+    files = sorted({path.resolve(): path for path in files}.values(), key=lambda p: p.name.lower())
+
+    end_dates: dict[str, pd.Timestamp] = {}
+    for path in files:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb[wb.sheetnames[0]]
+            rows = ws.iter_rows(values_only=True)
+            header_row = next(rows, None)
+            if header_row is None:
+                continue
+            headers = {_normalize_header(v): idx for idx, v in enumerate(header_row) if v is not None}
+            key_idx = next((headers[h] for h in MARCO_MASTER_KEY_HEADERS if h in headers), None)
+            date_idx = next((headers[h] for h in MARCO_MASTER_DATE_HEADERS if h in headers), None)
+            if key_idx is None or date_idx is None:
+                continue
+            last_key = None
+            for row in rows:
+                key = _clean_identifier_value(row[key_idx]) if key_idx < len(row) else None
+                # ME3N repite el marco solo en la primera fila del bloque; se arrastra.
+                if key is None:
+                    key = last_key
+                else:
+                    last_key = key
+                if key is None:
+                    continue
+                end = _clean_date_value(row[date_idx]) if date_idx < len(row) else pd.NaT
+                if pd.isna(end):
+                    continue
+                previous = end_dates.get(key)
+                if previous is None or end > previous:
+                    end_dates[key] = end
+        finally:
+            wb.close()
+    return end_dates
+
+
+def _enrich_marco_validity(df: pd.DataFrame, marco_end_dates: dict[str, pd.Timestamp]) -> tuple[pd.DataFrame, int]:
+    """Rellena 'Fecha de Termino' (donde falte) con el fin de validez del marco.
+
+    Solo toca filas con 'Contrato Marco' presente y 'Fecha de Termino' vacía; no
+    sobrescribe fechas ya pobladas. Devuelve (df, filas_rellenadas).
+    """
+    if not marco_end_dates or "Contrato Marco" not in df.columns:
+        return df, 0
+    result = df.copy()
+    termino = pd.to_datetime(result.get("Fecha de Termino"), errors="coerce")
+    marco = result["Contrato Marco"].map(_clean_identifier_value)
+    mapped = marco.map(marco_end_dates)
+    fill_mask = termino.isna() & mapped.notna()
+    result.loc[fill_mask, "Fecha de Termino"] = mapped[fill_mask]
+    return result, int(fill_mask.sum())
+
+
 def _derive_vigencia_date(df: pd.DataFrame, operations: list[str]) -> pd.DataFrame:
     """Fecha de referencia del consolidado.
 
@@ -486,6 +561,14 @@ def _derive_vigencia_date(df: pd.DataFrame, operations: list[str]) -> pd.DataFra
 def build_po_consolidation(inputs_root: Path, output_path: Path, operations: list[str]) -> ConsolidationResult:
     df, stats = consolidate_purchase_orders(inputs_root, operations)
     df = _enrich_with_usd_values(df)
+    if len(operations) == 1:
+        marco_end_dates = _load_marco_end_dates(inputs_root, operations[0])
+        if marco_end_dates:
+            df, filled = _enrich_marco_validity(df, marco_end_dates)
+            print(
+                f"  Cruce contratos-marco (ME3N): {len(marco_end_dates):,} marcos con fin de validez; "
+                f"Fecha de Termino rellenada en {filled:,} filas."
+            )
     df = _derive_vigencia_date(df, operations)
     print(f"  Escribiendo workbook: {output_path} ({len(df):,} filas)")
     _write_excel(df, output_path)
