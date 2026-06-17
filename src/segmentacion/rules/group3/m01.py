@@ -13,16 +13,17 @@ from __future__ import annotations
 import pandas as pd
 
 from src.rules.base import RuleResult
+from src.segmentacion.date_utils import to_datetime_ns
 
 
 def _effective_date(df: pd.DataFrame, config: dict) -> pd.Series:
-    primary = pd.to_datetime(
+    primary = to_datetime_ns(
         df.get(config.get("primary_date_column", "delivery_date"), pd.Series(pd.NaT, index=df.index)),
-        errors="coerce",
+        index=df.index,
     )
-    fallback = pd.to_datetime(
+    fallback = to_datetime_ns(
         df.get(config.get("fallback_date_column", "validity_end"), pd.Series(pd.NaT, index=df.index)),
-        errors="coerce",
+        index=df.index,
     )
     return primary.fillna(fallback)
 

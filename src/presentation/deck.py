@@ -103,7 +103,7 @@ class TempOCSnapshot:
 
 
 @dataclass
-class ComplementariaData:
+class SuministrosData:
     operation: str
     vigente_rows: int = 0
     vigente_usd: float = 0.0
@@ -113,6 +113,18 @@ class ComplementariaData:
     prefix_counts: dict[str, int] = field(default_factory=dict)
     con_material: int = 0
     sin_material: int = 0
+
+
+@dataclass
+class SupplySegmentRow:
+    segment: str
+    vigente_rows: int = 0
+    vcs_rows: int = 0
+    vss_rows: int = 0
+
+    @property
+    def total_rows(self) -> int:
+        return self.vigente_rows + self.vcs_rows + self.vss_rows
 
 
 @dataclass
@@ -451,9 +463,9 @@ def _load_temp_snapshot(path: Path, operation: str) -> TempOCSnapshot:
     return snapshot
 
 
-def _load_complementaria_data(output_root: Path, operation: str) -> ComplementariaData:
-    data = ComplementariaData(operation=operation)
-    pattern = f"reportes/complementaria_{operation.lower()}_*.xlsx"
+def _load_suministros_data(output_root: Path, operation: str) -> SuministrosData:
+    data = SuministrosData(operation=operation)
+    pattern = f"reportes/suministros_{operation.lower()}_*.xlsx"
     candidates = sorted(
         output_root.glob(pattern),
         key=lambda p: p.stat().st_mtime,
@@ -503,8 +515,57 @@ def _load_complementaria_data(output_root: Path, operation: str) -> Complementar
     return data
 
 
-def _load_complementaria_plants(output_root: Path, operation: str) -> list[PlantRow]:
-    pattern = f"reportes/complementaria_{operation.lower()}_*.xlsx"
+def _load_suministros_segments(output_root: Path, operation: str) -> list[SupplySegmentRow]:
+    """Lee la hoja Por_Subsegmento del reporte de Suministros más reciente.
+
+    Devuelve una fila por sub-bloque (excluye TOTAL y SUBTOTAL), con el conteo
+    por categoría de vigencia.
+    """
+    pattern = f"reportes/suministros_{operation.lower()}_*.xlsx"
+    candidates = sorted(
+        output_root.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return []
+
+    workbook = load_workbook(candidates[0], read_only=True, data_only=True)
+    if "Por_Subsegmento" not in workbook.sheetnames:
+        workbook.close()
+        return []
+
+    ws = workbook["Por_Subsegmento"]
+    headers = [_as_text(ws.cell(1, c).value) for c in range(1, ws.max_column + 1)]
+    idx = {h: i for i, h in enumerate(headers)}
+    col_seg = idx.get("Sub-bloque")
+    col_cat = idx.get("Categoría migración")
+    col_rows = idx.get("Filas")
+    if col_seg is None or col_cat is None or col_rows is None:
+        workbook.close()
+        return []
+
+    by_seg: dict[str, SupplySegmentRow] = {}
+    for row in range(2, ws.max_row + 1):
+        seg = _as_text(ws.cell(row, col_seg + 1).value)
+        cat = _as_text(ws.cell(row, col_cat + 1).value)
+        if not seg or seg == "TOTAL" or cat.startswith("SUBTOTAL") or not cat:
+            continue
+        filas = _as_int(ws.cell(row, col_rows + 1).value)
+        entry = by_seg.setdefault(seg, SupplySegmentRow(segment=seg))
+        if cat == "VIGENTE":
+            entry.vigente_rows = filas
+        elif cat == "NO_VIGENTE_CON_SALDO":
+            entry.vcs_rows = filas
+        elif cat == "NO_VIGENTE_SIN_SALDO":
+            entry.vss_rows = filas
+
+    workbook.close()
+    return list(by_seg.values())
+
+
+def _load_suministros_plants(output_root: Path, operation: str) -> list[PlantRow]:
+    pattern = f"reportes/suministros_{operation.lower()}_*.xlsx"
     candidates = sorted(
         output_root.glob(pattern),
         key=lambda p: p.stat().st_mtime,
@@ -1247,10 +1308,10 @@ def _add_operation_results_slide(prs: Presentation, summary: OperationSummary, o
     )
 
 
-def _add_complementaria_slide(
+def _add_suministros_slide(
     prs: Presentation,
-    mlcc_data: ComplementariaData,
-    ccmc_data: ComplementariaData,
+    mlcc_data: SuministrosData,
+    ccmc_data: SuministrosData,
 ) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
 
@@ -1272,8 +1333,8 @@ def _add_complementaria_slide(
     _add_header(
         slide,
         prs.slide_width,
-        "COMPLEMENTARIA — Universo no tipificado como D",
-        "Tipos de posición C, V, K, L, P y en blanco — segmentados por vigencia y saldo pendiente (cutoff: 30 Jun 2026)",
+        "Suministros — Visión general (universo no-D)",
+        "Posiciones distintas de servicio (Reparación, Consignación, Traslado, Stock, Cargo Directo) — vigencia por fecha y saldo (corte 30 Jun 2026)",
     )
 
     # KPI cards
@@ -1314,7 +1375,7 @@ def _add_complementaria_slide(
     # Callout: document prefix breakdown
     all_prefix_labels = ["46XXXX (Marco)", "45XXXX", "44XXXX", "49XXXX", "Otros"]
 
-    def _pfx(data: ComplementariaData, lbl: str) -> str:
+    def _pfx(data: SuministrosData, lbl: str) -> str:
         return _format_int(data.prefix_counts.get(lbl, 0))
 
     lines = [
@@ -1342,16 +1403,76 @@ def _add_complementaria_slide(
     ]
     _add_callout_box(slide, 0.78, 5.55, 11.44, 1.2, "Apertura por código de documento de compra", lines, GRAY_LIGHT, CHARCOAL, font_size=9)
 
-    _add_footnote(slide, "Fuente: reportes complementaria más recientes en outputs/reportes/.  Cutoff vigencia: 30 Jun 2026.")
+    _add_footnote(slide, "Fuente: reportes de Suministros más recientes en outputs/reportes/ (suministros-ordenes-compra). Corte vigencia: 30 Jun 2026.")
 
 
-def _add_complementaria_plant_slide(prs: Presentation, operation: str, plant_rows: list[PlantRow]) -> None:
+def _add_suministros_segment_slide(
+    prs: Presentation,
+    mlcc_segs: list[SupplySegmentRow],
+    ccmc_segs: list[SupplySegmentRow],
+) -> None:
+    """Apertura de Suministros por sub-bloque (Reparación, Consignación, ...)."""
     slide = prs.slides.add_slide(_find_blank_layout(prs))
     _add_header(
         slide,
         prs.slide_width,
-        f"{operation} | Complementaria — Apertura por Planta",
-        "Posiciones no tipificadas como D, segmentadas por vigencia y saldo pendiente (cutoff: 30 Jun 2026)",
+        "Suministros — Apertura por sub-bloque",
+        "Rotulación por tipo de posición y contrato marco, ortogonal a la vigencia (MLCC + CCMC combinados)",
+    )
+
+    order = ["Reparación", "Consignación", "Traslado/Transporte", "Stock", "Cargo Directo", "Otros"]
+    combined: dict[str, SupplySegmentRow] = {}
+    for seg_row in [*mlcc_segs, *ccmc_segs]:
+        entry = combined.setdefault(seg_row.segment, SupplySegmentRow(segment=seg_row.segment))
+        entry.vigente_rows += seg_row.vigente_rows
+        entry.vcs_rows += seg_row.vcs_rows
+        entry.vss_rows += seg_row.vss_rows
+
+    present = [seg for seg in order if seg in combined]
+    present += [seg for seg in combined if seg not in order]
+
+    rows = [["Sub-bloque", "VIGENTE", "NVCS (migra)", "NVSS (no migra)", "Total"]]
+    tot = SupplySegmentRow(segment="TOTAL")
+    for seg in present:
+        e = combined[seg]
+        tot.vigente_rows += e.vigente_rows
+        tot.vcs_rows += e.vcs_rows
+        tot.vss_rows += e.vss_rows
+        rows.append([
+            seg,
+            _format_int(e.vigente_rows),
+            _format_int(e.vcs_rows),
+            _format_int(e.vss_rows),
+            _format_int(e.total_rows),
+        ])
+    rows.append([
+        "TOTAL",
+        _format_int(tot.vigente_rows),
+        _format_int(tot.vcs_rows),
+        _format_int(tot.vss_rows),
+        _format_int(tot.total_rows),
+    ])
+
+    n_rows = len(rows)
+    tbl_height = min(4.6, max(1.4, n_rows * 0.5))
+    _add_table(slide, rows, 0.78, 2.1, 11.44, tbl_height, [3.2, 2.06, 2.06, 2.12, 2.0])
+
+    _add_callout_box(
+        slide, 0.78, 6.5, 11.44, 0.5,
+        "Criterio de sub-bloque",
+        ["Reparación = subcontratación (L) · Consignación = C/K · Traslado = V/U · Stock = vacío con marco · Cargo Directo = vacío sin marco"],
+        GRAY_LIGHT, CHARCOAL, font_size=9,
+    )
+    _add_footnote(slide, "Fuente: hoja Por_Subsegmento de los reportes de Suministros en outputs/reportes/. Corte vigencia: 30 Jun 2026.")
+
+
+def _add_suministros_plant_slide(prs: Presentation, operation: str, plant_rows: list[PlantRow]) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        f"{operation} | Suministros — Apertura por planta",
+        "Posiciones no-D, segmentadas por vigencia y saldo pendiente (corte: 30 Jun 2026)",
     )
 
     def _fmt_usd(value: float) -> str:
@@ -1438,7 +1559,7 @@ def _add_complementaria_plant_slide(prs: Presentation, operation: str, plant_row
             else:
                 cell.fill.fore_color.rgb = base_bg
 
-    _add_footnote(slide, "Fuente: reporte complementaria más reciente en outputs/reportes/.  Cutoff vigencia: 30 Jun 2026.")
+    _add_footnote(slide, "Fuente: reporte de Suministros más reciente en outputs/reportes/. Corte vigencia: 30 Jun 2026.")
 
 
 def generate_project_presentation(
@@ -1462,10 +1583,12 @@ def generate_project_presentation(
     ccmc_stats = _load_po_stats(ccmc_stats_path, "CCMC")
     mlcc_tmp = _load_temp_snapshot(tmp_stats_path, "MLCC")
     ccmc_tmp = _load_temp_snapshot(tmp_stats_path, "CCMC")
-    mlcc_comp = _load_complementaria_data(output_root, "MLCC")
-    ccmc_comp = _load_complementaria_data(output_root, "CCMC")
-    mlcc_plants = _load_complementaria_plants(output_root, "MLCC")
-    ccmc_plants = _load_complementaria_plants(output_root, "CCMC")
+    mlcc_comp = _load_suministros_data(output_root, "MLCC")
+    ccmc_comp = _load_suministros_data(output_root, "CCMC")
+    mlcc_plants = _load_suministros_plants(output_root, "MLCC")
+    ccmc_plants = _load_suministros_plants(output_root, "CCMC")
+    mlcc_segs = _load_suministros_segments(output_root, "MLCC")
+    ccmc_segs = _load_suministros_segments(output_root, "CCMC")
 
     for index in range(len(prs.slides) - 1, 0, -1):
         _delete_slide(prs, index)
@@ -1478,9 +1601,10 @@ def generate_project_presentation(
     _add_flow_slide(prs, mlcc_summary, ccmc_summary)
     _add_operation_results_slide(prs, ccmc_summary, "CCMC", GREEN, GREEN_LIGHT)
     _add_operation_results_slide(prs, mlcc_summary, "MLCC", BLUE, BLUE_LIGHT)
-    _add_complementaria_slide(prs, mlcc_comp, ccmc_comp)
-    _add_complementaria_plant_slide(prs, "MLCC", mlcc_plants)
-    _add_complementaria_plant_slide(prs, "CCMC", ccmc_plants)
+    _add_suministros_slide(prs, mlcc_comp, ccmc_comp)
+    _add_suministros_segment_slide(prs, mlcc_segs, ccmc_segs)
+    _add_suministros_plant_slide(prs, "MLCC", mlcc_plants)
+    _add_suministros_plant_slide(prs, "CCMC", ccmc_plants)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(output_path))

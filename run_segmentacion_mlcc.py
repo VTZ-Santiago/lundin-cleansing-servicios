@@ -21,7 +21,7 @@ from src.lineage.records import FieldLineageRecord, StageManifest
 from src.material_crossref.enrichment import enrich_material_rows
 from src.material_crossref.loader import load_material_master
 from src.ordenes_compra.exchange_rates import load_usd_rates
-from src.output.complementaria_report import generate_complementaria_report
+from src.output.suministros_report import generate_suministros_report
 from src.output.control_point import export_control_point
 from src.segmentacion.rules.group3.m01 import apply as _apply_m01
 from src.output.deliverable import export_deliverable
@@ -33,6 +33,7 @@ from src.segmentacion.rules.group1.e01 import before_cutoff_mask
 from src.segmentacion.po_loader import PurchaseOrderLoadResult, load_purchase_orders
 from src.segmentacion.report import build_segment_summary, write_summary_markdown
 from src.segmentacion.segments import SEGMENT_LABELS, segment_dataframe
+from src.segmentacion.supply_segments import SUPPLY_SEGMENT_COLUMN, classify_supply_segments
 
 
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "control_points"
@@ -94,8 +95,8 @@ def _material_master_path(operation: str) -> Path:
     return _first_match(ROOT / "inputs" / operation.upper(), f"{operation.upper()} - An*lisis Completo.xlsx")
 
 
-def _po_source_files(operation: str) -> list[Path]:
-    directory = ROOT / "inputs" / operation.upper() / "ordenes-compra"
+def _po_source_files(operation: str, subdir: str = "ordenes-compra") -> list[Path]:
+    directory = ROOT / "inputs" / operation.upper() / subdir
     files = [
         path
         for path in list(directory.glob("*.xlsx")) + list(directory.glob("*.XLSX"))
@@ -165,12 +166,13 @@ def _write_cache(cache_name: str, metadata: dict[str, Any], payload: Any, cache_
     print(f"Cache actualizado: {cache_label}.")
 
 
-def _po_cache_metadata(operation: str) -> dict[str, Any]:
+def _po_cache_metadata(operation: str, subdir: str = "ordenes-compra") -> dict[str, Any]:
     return {
         "cache_version": CACHE_VERSION,
         "cache_kind": "po_universe",
         "operation": operation.upper(),
-        "source_files": [_path_signature(path) for path in _po_source_files(operation)],
+        "subdir": subdir,
+        "source_files": [_path_signature(path) for path in _po_source_files(operation, subdir)],
     }
 
 
@@ -184,16 +186,21 @@ def _enrichment_cache_metadata(operation: str) -> dict[str, Any]:
     }
 
 
-def _load_purchase_orders_cached(operation: str, use_cache: bool) -> PurchaseOrderLoadResult:
-    cache_name = f"po_universe_{operation.lower()}"
-    cache_label = f"universo OC {operation.upper()}"
-    metadata = _po_cache_metadata(operation)
+def _load_purchase_orders_cached(
+    operation: str,
+    use_cache: bool,
+    subdir: str = "ordenes-compra",
+    cache_suffix: str = "",
+) -> PurchaseOrderLoadResult:
+    cache_name = f"po_universe_{operation.lower()}{cache_suffix}"
+    cache_label = f"universo OC {operation.upper()} ({subdir})"
+    metadata = _po_cache_metadata(operation, subdir)
     cached = _load_cache(cache_name, cache_label, metadata, use_cache)
     if cached is not None:
         return cached
 
-    print("Cargando ordenes de compra de todos los periodos...")
-    load_result = load_purchase_orders(ROOT / "inputs", operation=operation)
+    print(f"Cargando ordenes de compra de todos los periodos ({subdir})...")
+    load_result = load_purchase_orders(ROOT / "inputs", operation=operation, subdir=subdir)
     if use_cache:
         _write_cache(cache_name, metadata, load_result, cache_label)
     return load_result
@@ -340,6 +347,27 @@ def _drop_rule_conditions(
     return adjusted
 
 
+def _prune_absent_conditions(
+    rules: list[SegmentRule],
+    available_columns: set[str],
+) -> tuple[list[SegmentRule], set[str]]:
+    """Quita condiciones cuya columna no existe en absoluto en el universo.
+
+    Una condición ``present``/``absent`` sobre una columna que la fuente no trae
+    es degenerada (present => no matchea nada; absent => matchea todo). En vez de
+    anular el universo, se ignora. Solo afecta columnas ENTERAMENTE ausentes; los
+    nulos por fila no se tocan. Devuelve (reglas_podadas, columnas_ignoradas).
+    """
+    dropped: set[str] = set()
+    pruned: list[SegmentRule] = []
+    for rule in rules:
+        conditions = tuple(c for c in rule.conditions if c.column in available_columns)
+        dropped.update(c.column for c in rule.conditions if c.column not in available_columns)
+        if conditions:
+            pruned.append(SegmentRule(rule.segment_id, rule.source_sheet, rule.source_row, conditions))
+    return pruned, dropped
+
+
 def _segment_priority(operation: str) -> list[str] | None:
     # Sin prioridad: las filas que caen en ambos segmentos (p.ej. clase ZADI)
     # se conservan DUPLICADAS en contratos y en ordenes_servicio. Requiere
@@ -426,6 +454,83 @@ def _apply_migration_rules(df: pd.DataFrame, operation: str) -> tuple[pd.DataFra
     return df_g3, g1_issues + g2_issues + g3_issues, [g1_manifest, g2_manifest, g3_manifest]
 
 
+def _run_suministros_branch(operation: str, output_dir: Path, use_cache: bool) -> None:
+    """Procesa el universo SUMINISTROS (no-D) desde su fuente dedicada.
+
+    Carga `inputs/<OP>/suministros-ordenes-compra`, aplica M01 (vigencia por
+    fecha y saldo), rotula el sub-bloque (`supply_segment`) de forma ortogonal a
+    la vigencia y genera el reporte de Suministros. No interviene la
+    segmentación tipo D, que vive en `ordenes-compra`.
+    """
+    m01_config = _load_m01_config()
+    report_cfg = _load_complementaria_report_config()
+    reportes_dir = output_dir.parent / report_cfg.get("output_subdir", "reportes")
+    enabled = report_cfg.get("enabled", {})
+    if isinstance(enabled, dict):
+        enabled = enabled.get(operation, True)
+    if not (enabled and m01_config):
+        return
+
+    load_result = _load_purchase_orders_cached(
+        operation,
+        use_cache=use_cache,
+        subdir="suministros-ordenes-compra",
+        cache_suffix="_suministros",
+    )
+    df = load_result.dataframe
+    print(f"Filas Suministros limpias {operation}: {len(df):,}", flush=True)
+
+    # M01: clasifica vigencia (fecha -> saldo) sobre todo el universo; el tipo D
+    # cae en TIPO_D y queda fuera del reporte de Suministros.
+    m01_result = _apply_m01(df, operation, m01_config)
+    for col, series in m01_result.updates.items():
+        df[col] = series.values
+
+    cat_col = m01_config.get("output_column", "migration_category")
+    excluded_cat = m01_config.get("category_excluded_type", "TIPO_D")
+    if cat_col in df.columns:
+        cat_counts = df[cat_col].value_counts()
+        print(
+            f"Suministros {operation} universo completo: "
+            + " | ".join(f"{cat}={cnt:,}" for cat, cnt in cat_counts.items()),
+            flush=True,
+        )
+
+    # Sub-segmentación (rótulo ortogonal a la vigencia).
+    df[SUPPLY_SEGMENT_COLUMN] = classify_supply_segments(df)
+    non_d = df[df[cat_col] != excluded_cat] if cat_col in df.columns else df
+    seg_counts = non_d[SUPPLY_SEGMENT_COLUMN].value_counts()
+    print(
+        f"Suministros {operation} no-D por sub-bloque ({len(non_d):,}): "
+        + " | ".join(f"{seg}={cnt:,}" for seg, cnt in seg_counts.items()),
+        flush=True,
+    )
+
+    # Tasas USD (fallback silencioso si no hay red).
+    usd_rates: dict = {}
+    try:
+        _fx_cache = ROOT / "tmp" / "cache" / "exchange_rates.json"
+        usd_rates = load_usd_rates(
+            df.get("currency", []),
+            cache_path=_fx_cache,
+            as_of_date=datetime.now().strftime("%Y-%m-%d"),
+        )
+        print(f"Tasas USD cargadas para: {', '.join(sorted(usd_rates))}", flush=True)
+    except Exception as exc:
+        print(f"Advertencia: no se pudieron cargar tasas USD ({exc}). Reporte sin columnas USD.", flush=True)
+
+    report_path = generate_suministros_report(
+        segment_id=operation.lower(),
+        label=f"Suministros {operation}",
+        df=df,
+        m01_config=m01_config,
+        output_dir=reportes_dir,
+        usd_rates=usd_rates,
+    )
+    if report_path:
+        print(f"Reporte Suministros: {report_path.relative_to(ROOT).as_posix()}", flush=True)
+
+
 def run(
     operation: str = "MLCC",
     output_dir: Path = DEFAULT_OUTPUT_DIR,
@@ -451,51 +556,18 @@ def run(
         master, material_manifest = _load_material_enrichment_cached(master, operation, load_result, use_cache=use_cache)
         manifests.append(material_manifest)
 
-    # --- Load COMPLEMENTARIA config and apply M01 to the FULL OC universe BEFORE segmentation.
-    # The segmentation only classifies ~11k rows (all type D), so per-segment M01 would only
-    # ever see D rows. Applying here gives correct coverage: all 369k+ non-D rows for MLCC.
-    m01_config = _load_m01_config()
-    comp_report_cfg = _load_complementaria_report_config()
-    reportes_dir = output_dir.parent / comp_report_cfg.get("output_subdir", "reportes")
-    comp_enabled = comp_report_cfg.get("enabled", {})
-    if isinstance(comp_enabled, dict):
-        comp_enabled = comp_enabled.get(operation, True)
+    # --- SUMINISTROS (universo no-D): se procesa aparte, leyendo su propia fuente
+    # (inputs/<OP>/suministros-ordenes-compra). La carga `master` de arriba queda
+    # reservada para las posiciones tipo D (Contratos y Órdenes de Servicio).
+    _run_suministros_branch(operation, output_dir, use_cache=use_cache)
 
-    if comp_enabled and m01_config:
-        m01_result = _apply_m01(master, operation, m01_config)
-        for col, series in m01_result.updates.items():
-            master[col] = series.values
-        cat_col = m01_config.get("output_column", "migration_category")
-        if cat_col in master.columns:
-            cat_counts = master[cat_col].value_counts()
-            print(
-                f"Complementaria {operation} universo completo OC: "
-                + " | ".join(f"{cat}={cnt:,}" for cat, cnt in cat_counts.items()),
-                flush=True,
-            )
-        # Fetch USD exchange rates for value conversion (graceful fallback if network unavailable)
-        usd_rates: dict = {}
-        try:
-            _fx_cache = ROOT / "tmp" / "cache" / "exchange_rates.json"
-            usd_rates = load_usd_rates(
-                master.get("currency", []),
-                cache_path=_fx_cache,
-                as_of_date=datetime.now().strftime("%Y-%m-%d"),
-            )
-            print(f"Tasas USD cargadas para: {', '.join(sorted(usd_rates))}", flush=True)
-        except Exception as exc:
-            print(f"Advertencia: no se pudieron cargar tasas USD ({exc}). Reporte sin columnas USD.", flush=True)
-
-        comp_path = generate_complementaria_report(
-            segment_id=operation.lower(),
-            label=f"Universo OC {operation}",
-            df=master,
-            m01_config=m01_config,
-            output_dir=reportes_dir,
-            usd_rates=usd_rates,
+    segment_rules, dropped_cols = _prune_absent_conditions(segment_rules, set(master.columns))
+    if dropped_cols:
+        print(
+            f"Aviso: columnas ausentes en {operation} ordenes-compra, condiciones ignoradas: "
+            + ", ".join(sorted(dropped_cols)),
+            flush=True,
         )
-        if comp_path:
-            print(f"Reporte complementaria: {comp_path.relative_to(ROOT).as_posix()}", flush=True)
 
     segment_priority = _segment_priority(operation)
     print("Segmentando universo OC...", flush=True)

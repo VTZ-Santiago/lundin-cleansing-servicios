@@ -155,8 +155,8 @@ def _mapping_by_normalized_header() -> dict[str, str]:
     }
 
 
-def _excel_files(inputs_root: Path, operation: str) -> list[Path]:
-    directory = inputs_root / operation.upper() / "ordenes-compra"
+def _excel_files(inputs_root: Path, operation: str, subdir: str = "ordenes-compra") -> list[Path]:
+    directory = inputs_root / operation.upper() / subdir
     if not directory.exists():
         raise FileNotFoundError(f"Input directory not found: {directory}")
     files = [
@@ -313,14 +313,18 @@ def _build_lineage(df: pd.DataFrame, raw_names: dict[str, set[str]]) -> LineageR
     return report
 
 
-def load_purchase_orders(inputs_root: Path, operation: str = "MLCC") -> PurchaseOrderLoadResult:
+def load_purchase_orders(
+    inputs_root: Path,
+    operation: str = "MLCC",
+    subdir: str = "ordenes-compra",
+) -> PurchaseOrderLoadResult:
     started = datetime.now()
     mapping = _mapping_by_normalized_header()
     frames: list[pd.DataFrame] = []
     stats: list[SourceFileStats] = []
     raw_names: dict[str, set[str]] = {}
 
-    for path in _excel_files(inputs_root, operation):
+    for path in _excel_files(inputs_root, operation, subdir):
         print(f"  Leyendo [{operation.upper()}] {path.name}", flush=True)
         file_df, file_stat, raw_by_canonical = _stream_file(path, operation, mapping)
         if not file_df.empty:

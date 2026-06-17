@@ -1,15 +1,16 @@
 import pandas as pd
 
 from src.rules.base import RuleResult
+from src.segmentacion.date_utils import to_datetime_ns
 
 
 def _effective_date(df: pd.DataFrame, config: dict) -> pd.Series:
     primary_column = config.get("primary_date_column", "delivery_date")
     fallback_column = config.get("fallback_date_column", "validity_end")
-    primary = pd.to_datetime(df.get(primary_column, pd.Series(pd.NaT, index=df.index)), errors="coerce")
+    primary = to_datetime_ns(df.get(primary_column, pd.Series(pd.NaT, index=df.index)), index=df.index)
     if not fallback_column:
         return primary
-    fallback = pd.to_datetime(df.get(fallback_column, pd.Series(pd.NaT, index=df.index)), errors="coerce")
+    fallback = to_datetime_ns(df.get(fallback_column, pd.Series(pd.NaT, index=df.index)), index=df.index)
     return primary.fillna(fallback)
 
 

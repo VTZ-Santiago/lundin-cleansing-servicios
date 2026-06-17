@@ -5,18 +5,33 @@ Pipeline de limpieza, identificación, segmentación y control de datos para **c
 La rama `all-rules` ajusta las reglas al alcance descrito en `resources/Aumento alcance servicio Data cleansing vf2.pdf`. El alcance activo se limita a los dominios con inputs disponibles en este repositorio:
 
 - `contratos`: convenios/contratos SAP en `inputs/MLCC/contratos`.
-- `ordenes-compra`: órdenes de compra de material catalogado y cargo directo en `inputs/<operacion>/ordenes-compra`.
+- `ordenes-compra`: órdenes de compra **tipo D** (Contratos y Órdenes de Servicio) en `inputs/<operacion>/ordenes-compra`.
+- `suministros-ordenes-compra`: órdenes de compra **no-D** (Suministros) en `inputs/<operacion>/suministros-ordenes-compra`.
 
 Los puntos del PDF sobre órdenes de servicio, HES, PR/SOLPED y reservas quedan documentados como alcance no activo porque no existe un dominio de entrada separado para esos paquetes de datos.
 
 ## Nuevo flujo: segmentación MLCC/CCMC desde órdenes
 
-El flujo `run_segmentacion_mlcc.py` parte desde todos los Excel de `inputs/<operacion>/ordenes-compra`, sin conservar la separación por período, y segmenta el universo inicial en:
+El flujo `run_segmentacion_mlcc.py` trabaja con **dos universos independientes** que se leen de **fuentes separadas**:
 
-- `contratos`: órdenes que cumplen los criterios de contratos definidos en `tmp/Caracterización de Contratos.xlsx`.
-- `ordenes_servicio`: órdenes de servicio definidas en el mismo archivo.
+1. **Tipo D — Contratos y Órdenes de Servicio.** Se cargan todos los Excel de `inputs/<operacion>/ordenes-compra` y se segmentan en:
+   - `contratos`: órdenes que cumplen los criterios de contratos definidos en `tmp/Caracterización de Contratos.xlsx`.
+   - `ordenes_servicio`: órdenes de servicio definidas en el mismo archivo.
+2. **Suministros (no-D).** Se cargan todos los Excel de `inputs/<operacion>/suministros-ordenes-compra` y se procesan aparte (M01 de vigencia + sub-segmentación + reporte). Las filas tipo D que vengan en esa fuente caen en `TIPO_D` y quedan fuera del universo de Suministros.
 
-El bloque de órdenes de servicio de reparación del archivo de caracterización no se considera todavía.
+### Sub-segmentación de Suministros
+
+Cada posición no-D recibe un **sub-bloque** (`supply_segment`) usando el tipo de posición (letra canónica) y la presencia de contrato marco — **ortogonal** a la vigencia. La equivalencia de tipos entre operaciones (el `.xlsx` de caracterización manda en la rotulación):
+
+| Núm SAP | CCMC | MLCC | Significado | Sub-bloque |
+|---|---|---|---|---|
+| 3 | L | L | subcontratación | **Reparación** |
+| 2 | K | C | consignación | **Consignación** |
+| 7 | U | V | traslado/transporte | **Traslado/Transporte** |
+| 0 | (vacío) | (vacío) | estándar | **Stock** (con marco) / **Cargo Directo** (sin marco) |
+| 9 | D | D | servicio | excluido → `TIPO_D` |
+
+La vigencia (M01) se aplica **primero** (por fecha y luego por saldo → VIGENTE / NO_VIGENTE_CON_SALDO que migra / NO_VIGENTE_SIN_SALDO que no migra) y la rotulación del sub-bloque se concilia encima: dentro de un mismo sub-bloque puede haber filas vigentes y no vigentes. Ver `src/segmentacion/README.md`.
 
 La segmentación `C1` ignora fechas y saldos por entregar. En MLCC, el segmento `contratos` no exige `outline_contract` y los solapamientos se resuelven priorizando `ordenes_servicio`; en CCMC, `contratos` sí exige `outline_contract` porque el campo está disponible y es discriminante. Para CCMC se usan headers en inglés como `Outline Agreement`, `Plant`, `Purchasing Doc. Type`, `Item Category.1`, `Release group` y `Deletion Indicator`.
 
