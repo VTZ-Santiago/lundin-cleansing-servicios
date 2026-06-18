@@ -24,7 +24,7 @@ from src.ordenes_compra.exchange_rates import load_usd_rates
 from src.output.suministros_report import generate_suministros_report
 from src.output.control_point import export_control_point
 from src.segmentacion.rules.group3.m01 import apply as _apply_m01
-from src.output.deliverable import export_deliverable
+from src.output.deliverable import append_sheet_to_deliverable, export_deliverable
 from src.profiling.profiler import DataProfiler
 from src.rules.engine import RuleEngine
 from src.segmentacion.characterization import SegmentRule, load_segment_rules
@@ -34,6 +34,7 @@ from src.segmentacion.po_loader import PurchaseOrderLoadResult, load_purchase_or
 from src.segmentacion.report import build_segment_summary, write_summary_markdown
 from src.segmentacion.segments import SEGMENT_LABELS, segment_dataframe
 from src.segmentacion.supply_segments import SUPPLY_SEGMENT_COLUMN, classify_supply_segments
+from src.segmentacion.ost_vigentes import build_missing_ost_vigentes, find_registry
 
 
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "control_points"
@@ -607,6 +608,8 @@ def run(
     )
 
     summaries = []
+    migra_documents: set[str] = set()
+    contratos_export_cols: list[str] = []
     for segment_id in sorted(segments):
         label = SEGMENT_LABELS.get(segment_id, segment_id)
         c1 = segments[segment_id]
@@ -664,8 +667,15 @@ def run(
                 load_result,
             )
 
+        # Acumula los documentos que migran (contratos ∪ OS) para detectar las
+        # OST vigentes sin marco que quedan fuera (ver bloque post-loop).
+        if "purchase_document" in c2.columns:
+            migra_documents.update(str(d) for d in c2["purchase_document"].dropna().tolist())
+
         if export_entregables:
             export_cols = [col for col in CONTROL_POINT_COLUMNS if col in c2.columns]
+            if segment_id == "contratos":
+                contratos_export_cols = export_cols
             export_deliverable(
                 c2[export_cols].copy(),
                 entregables_dir / f"OC_migra_{segment_id}_{operation}.xlsx",
@@ -692,6 +702,28 @@ def run(
         )
         if not summary.reconciliation_ok:
             raise RuntimeError(f"Reconciliacion fallida para {label}")
+
+    # OST vigentes sin contrato madre (45* sin 46*): el cliente las pide como
+    # hoja extra del entregable de contratos porque están vigentes aunque no
+    # cuelguen de un marco. Solo afecta ese entregable; no toca controles ni la
+    # lógica de migración.
+    if export_entregables and contratos_export_cols:
+        registry_path = find_registry(ROOT / "tmp")
+        if registry_path is not None:
+            ost_df = build_missing_ost_vigentes(
+                master, migra_documents, registry_path, contratos_export_cols
+            )
+            if not ost_df.empty:
+                deliverable_path = entregables_dir / f"OC_migra_contratos_{operation}.xlsx"
+                append_sheet_to_deliverable(
+                    ost_df, deliverable_path, sheet_name="MIGRA_OST_SIN_MARCO"
+                )
+                print(
+                    f"  OST vigentes sin marco ({registry_path.name}): "
+                    f"{len(ost_df):,} posiciones agregadas a {deliverable_path.name} "
+                    f"(hoja MIGRA_OST_SIN_MARCO).",
+                    flush=True,
+                )
 
     source_files = [stat.source_file for stat in load_result.file_stats if not stat.skipped]
     summary_path = write_summary_markdown(
