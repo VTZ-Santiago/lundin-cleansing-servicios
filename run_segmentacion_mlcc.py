@@ -28,13 +28,20 @@ from src.output.deliverable import append_sheet_to_deliverable, export_deliverab
 from src.profiling.profiler import DataProfiler
 from src.rules.engine import RuleEngine
 from src.segmentacion.characterization import SegmentRule, load_segment_rules
-from src.segmentacion.contract_validity import apply_contract_validity, load_vigentes_index
+from src.segmentacion.contract_validity import (
+    END_DATE_COLUMN,
+    MATCH_SOURCE_COLUMN,
+    apply_contract_validity,
+    load_vigentes_index,
+)
+from src.segmentacion.date_utils import to_datetime_ns
 from src.segmentacion.rules.group1.e01 import before_cutoff_mask
 from src.segmentacion.po_loader import PurchaseOrderLoadResult, load_purchase_orders
 from src.segmentacion.report import build_segment_summary, write_summary_markdown
 from src.segmentacion.segments import SEGMENT_LABELS, segment_dataframe
 from src.segmentacion.supply_segments import SUPPLY_SEGMENT_COLUMN, classify_supply_segments
 from src.segmentacion.ost_vigentes import build_missing_ost_vigentes, find_registry
+from src.segmentacion.bd_vigentes_mlcc import build_os_vigentes_bd, find_bd_base
 
 
 DEFAULT_OUTPUT_DIR = ROOT / "outputs" / "control_points"
@@ -332,7 +339,14 @@ def _drop_rule_conditions(
     operation = operation.upper()
     drop_columns_by_segment: dict[str, set[str]] = {}
     if operation == "MLCC":
-        drop_columns_by_segment = {"contratos": {"outline_contract"}}
+        # purchase_requisition es un artefacto de export (ausente en
+        # ordenes-compra, vacío en suministros-ordenes-compra). Soltarla mantiene
+        # la partición contratos/OS consistente entre ambas bases, necesario
+        # porque las OS de MLCC se leen de la base de suministros.
+        drop_columns_by_segment = {
+            "contratos": {"outline_contract", "plant_code", "purchase_requisition"},
+            "ordenes_servicio": {"plant_code", "purchase_requisition"},
+        }
     elif operation == "CCMC":
         drop_columns_by_segment = {
             "contratos": {"plant_code", "purchase_doc_class"},
@@ -370,9 +384,11 @@ def _prune_absent_conditions(
 
 
 def _segment_priority(operation: str) -> list[str] | None:
-    # Sin prioridad: las filas que caen en ambos segmentos (p.ej. clase ZADI)
-    # se conservan DUPLICADAS en contratos y en ordenes_servicio. Requiere
-    # ejecutar con allow_overlap=True para no abortar por el solape.
+    # MLCC: al quitar el filtro de planta, filas ZADI D sin marco califican tanto
+    # en contratos como en ordenes_servicio. La prioridad resuelve el solapamiento
+    # a favor de contratos (si una fila es contrato, no se duplica como OS).
+    if operation.upper() == "MLCC":
+        return ["contratos", "ordenes_servicio"]
     return None
 
 
@@ -445,6 +461,25 @@ def _vencidos_con_saldo_pendiente(df: pd.DataFrame, e01_config: dict) -> pd.Data
     expired = before_cutoff_mask(df, e01_config)
     has_balance = (pending_qty > 0) | (pending_value > 0)
     return df[expired & has_balance].copy()
+
+
+def _sum_usd(
+    df: pd.DataFrame,
+    usd_rates: dict[str, float],
+    value_col: str = "pending_delivery_value",
+) -> float:
+    """Suma `value_col` convertido a USD por `currency`. 0.0 si faltan datos/tasas.
+
+    Mismo criterio que `suministros_report._apply_usd_column` (1 unidad de la
+    moneda = usd_rates[moneda] dólares).
+    """
+    if df.empty or not usd_rates or value_col not in df.columns or "currency" not in df.columns:
+        return 0.0
+    rates = (
+        df["currency"].fillna("").astype(str).str.strip().str.upper().map(lambda c: usd_rates.get(c, 0.0))
+    )
+    total = (pd.to_numeric(df[value_col], errors="coerce").fillna(0.0) * rates).sum()
+    return round(float(total), 2)
 
 
 def _apply_migration_rules(df: pd.DataFrame, operation: str) -> tuple[pd.DataFrame, list, list[StageManifest]]:
@@ -596,7 +631,40 @@ def run(
             f"Muestra guardada en {sample_path}."
         )
 
+    # --- MLCC: las Órdenes de Servicio se toman de la base de suministros
+    # (inputs/MLCC/suministros-ordenes-compra), NO de ordenes-compra. Esa base sí
+    # trae `delivery_date`, así que la vigencia de OS se determina por fecha de
+    # entrega (como Suministros) en vez del cruce con contratos vigentes. Contratos
+    # sigue saliendo de ordenes-compra (cruce). La partición contratos/OS sobre la
+    # base de suministros usa las mismas reglas y prioridad; el cruce contra los
+    # contratos de ordenes-compra es disjunto a nivel (documento, posición).
+    os_from_delivery_date: set[str] = set()
+    if operation == "MLCC":
+        su_load = _load_purchase_orders_cached(
+            operation,
+            use_cache=use_cache,
+            subdir="suministros-ordenes-compra",
+            cache_suffix="_suministros",
+        )
+        su_df = su_load.dataframe
+        su_rules, _ = _prune_absent_conditions(
+            _drop_rule_conditions(load_segment_rules(_characterization_path()), operation),
+            set(su_df.columns),
+        )
+        su_segments, _ = segment_dataframe(su_df, su_rules, priority=segment_priority)
+        os_su = su_segments.get("ordenes_servicio")
+        if os_su is not None:
+            prev_os = len(segments.get("ordenes_servicio", os_su.iloc[0:0]))
+            segments["ordenes_servicio"] = os_su.copy()
+            os_from_delivery_date.add("ordenes_servicio")
+            print(
+                f"OS MLCC desde suministros-ordenes-compra: {len(os_su):,} posiciones "
+                f"(antes desde ordenes-compra: {prev_os:,}); vigencia por fecha de entrega.",
+                flush=True,
+            )
+
     e01_config = _load_e01_config()
+    value_col = e01_config.get("pending_value_column", "pending_delivery_value")
     entregables_dir = output_dir.parent / "entregables"
 
     vigentes_index = load_vigentes_index(operation, ROOT / "inputs")
@@ -607,21 +675,56 @@ def run(
         flush=True,
     )
 
+    # Tasas USD para valorizar lo que migra y lo vencido-con-saldo (sidecar para
+    # la presentación). Fallback silencioso si no hay red; los valores caen a 0.
+    usd_rates: dict[str, float] = {}
+    try:
+        usd_rates = load_usd_rates(
+            master.get("currency", []),
+            cache_path=ROOT / "tmp" / "cache" / "exchange_rates.json",
+            as_of_date=datetime.now().strftime("%Y-%m-%d"),
+        )
+        print(f"Tasas USD cargadas para: {', '.join(sorted(usd_rates))}", flush=True)
+    except Exception as exc:  # noqa: BLE001 - operativo: seguir sin USD
+        print(f"Advertencia: tasas USD no disponibles ({exc}); valores en USD = 0.", flush=True)
+
     summaries = []
     migra_documents: set[str] = set()
     contratos_export_cols: list[str] = []
+    ordenes_servicio_export_cols: list[str] = []
+    valores_segments: dict[str, dict] = {}
     for segment_id in sorted(segments):
         label = SEGMENT_LABELS.get(segment_id, segment_id)
         c1 = segments[segment_id]
         segment_output_dir = output_dir / segment_id
         print(f"Procesando segmento {operation} {label}: C1={len(c1):,}", flush=True)
 
-        c1, cruce_stats = apply_contract_validity(c1, vigentes_index)
-        print(
-            f"  Cruce vigencia {label}: por marco={cruce_stats['by_contract']:,} | "
-            f"por documento={cruce_stats['by_document']:,} | sin cruce={cruce_stats['sin_cruce']:,}",
-            flush=True,
-        )
+        if segment_id in os_from_delivery_date:
+            # Vigencia por fecha de entrega (base de suministros): no hay cruce
+            # con contratos vigentes. Se alimenta `contract_end_date` con
+            # delivery_date (fallback validity_end) para que E01 la use igual.
+            c1 = c1.copy()
+            effective = to_datetime_ns(
+                c1.get("delivery_date", pd.Series(pd.NaT, index=c1.index)), index=c1.index
+            ).fillna(
+                to_datetime_ns(
+                    c1.get("validity_end", pd.Series(pd.NaT, index=c1.index)), index=c1.index
+                )
+            )
+            c1[END_DATE_COLUMN] = effective
+            c1[MATCH_SOURCE_COLUMN] = "FECHA_ENTREGA"
+            print(
+                f"  Vigencia {label} por fecha de entrega: con fecha="
+                f"{int(effective.notna().sum()):,}/{len(c1):,}",
+                flush=True,
+            )
+        else:
+            c1, cruce_stats = apply_contract_validity(c1, vigentes_index)
+            print(
+                f"  Cruce vigencia {label}: por marco={cruce_stats['by_contract']:,} | "
+                f"por documento={cruce_stats['by_document']:,} | sin cruce={cruce_stats['sin_cruce']:,}",
+                flush=True,
+            )
 
         if export_control_points:
             _export_cp(
@@ -672,16 +775,28 @@ def run(
         if "purchase_document" in c2.columns:
             migra_documents.update(str(d) for d in c2["purchase_document"].dropna().tolist())
 
+        # Vencidos con saldo (migran como caso de seguimiento) — siempre se
+        # calcula para valorizar en USD, aunque no se exporten entregables.
+        vencidos = _vencidos_con_saldo_pendiente(c2_no_migra, e01_config)
+        valores_segments[segment_id] = {
+            "label": label,
+            "c2_rows": int(len(c2)),
+            "c2_usd": _sum_usd(c2, usd_rates, value_col),
+            "vencidos_rows": int(len(vencidos)),
+            "vencidos_usd": _sum_usd(vencidos, usd_rates, value_col),
+        }
+
         if export_entregables:
             export_cols = [col for col in CONTROL_POINT_COLUMNS if col in c2.columns]
             if segment_id == "contratos":
                 contratos_export_cols = export_cols
+            if segment_id == "ordenes_servicio":
+                ordenes_servicio_export_cols = export_cols
             export_deliverable(
                 c2[export_cols].copy(),
                 entregables_dir / f"OC_migra_{segment_id}_{operation}.xlsx",
                 sheet_name="C2_MIGRA",
             )
-            vencidos = _vencidos_con_saldo_pendiente(c2_no_migra, e01_config)
             export_deliverable(
                 vencidos[export_cols].copy(),
                 entregables_dir / f"OC_vencidos_saldo_{segment_id}_{operation}.xlsx",
@@ -707,7 +822,8 @@ def run(
     # hoja extra del entregable de contratos porque están vigentes aunque no
     # cuelguen de un marco. Solo afecta ese entregable; no toca controles ni la
     # lógica de migración.
-    if export_entregables and contratos_export_cols:
+    ost_valores: dict | None = None
+    if export_entregables and contratos_export_cols and operation == "CCMC":
         registry_path = find_registry(ROOT / "tmp")
         if registry_path is not None:
             ost_df = build_missing_ost_vigentes(
@@ -724,6 +840,71 @@ def run(
                     f"(hoja MIGRA_OST_SIN_MARCO).",
                     flush=True,
                 )
+                # Valor USD de las OST (cruce por documento+posición con el maestro,
+                # que sí trae currency). Línea aparte: su reconciliación con el
+                # cliente sigue pendiente.
+                def _nk(value: object) -> str:
+                    text = str(value).strip()
+                    return text[:-2] if text.endswith(".0") else text
+
+                ost_keys = {
+                    (_nk(d), _nk(p))
+                    for d, p in zip(ost_df["purchase_document"], ost_df["position"])
+                }
+                if {"purchase_document", "position"}.issubset(master.columns):
+                    m_keys = list(zip(master["purchase_document"].map(_nk), master["position"].map(_nk)))
+                    ost_mask = pd.Series([k in ost_keys for k in m_keys], index=master.index)
+                    ost_usd = _sum_usd(master[ost_mask], usd_rates, value_col)
+                else:
+                    ost_usd = 0.0
+                ost_valores = {"rows": int(len(ost_df)), "usd": ost_usd}
+
+    # MLCC: hoja extra con las OS vigentes del catálogo del cliente
+    # (Sitio Caserones_BD <mes>, hoja SAP). Su vigencia vive en "Fin período
+    # validez" (no en delivery_date), así que el flujo no las marca vigentes.
+    # Se anexan al entregable de OS con el nombre del archivo ingerido. Solo
+    # afecta ese entregable; no toca controles ni la lógica de migración.
+    if export_entregables and operation == "MLCC":
+        bd_path = find_bd_base(ROOT / "inputs" / "MLCC")
+        if bd_path is not None:
+            bd_cols = ordenes_servicio_export_cols or [
+                c for c in CONTROL_POINT_COLUMNS
+            ]
+            bd_df = build_os_vigentes_bd(
+                bd_path, bd_cols, e01_config.get("cutoff_date", "2026-06-30")
+            )
+            if not bd_df.empty:
+                deliverable_path = entregables_dir / f"OC_migra_ordenes_servicio_{operation}.xlsx"
+                append_sheet_to_deliverable(
+                    bd_df, deliverable_path, sheet_name=bd_path.stem
+                )
+                print(
+                    f"  OS vigentes catálogo cliente ({bd_path.name}): "
+                    f"{len(bd_df):,} posiciones agregadas a {deliverable_path.name} "
+                    f"(hoja '{bd_path.stem}').",
+                    flush=True,
+                )
+
+    # Sidecar de valores (USD) para la presentación: cuánta plata migra y cuánta
+    # está vencida con saldo. No afecta entregables ni controles.
+    valores_totals = {
+        "c2_rows": sum(v["c2_rows"] for v in valores_segments.values()),
+        "c2_usd": round(sum(v["c2_usd"] for v in valores_segments.values()), 2),
+        "vencidos_rows": sum(v["vencidos_rows"] for v in valores_segments.values()),
+        "vencidos_usd": round(sum(v["vencidos_usd"] for v in valores_segments.values()), 2),
+    }
+    valores_payload: dict = {
+        "operation": operation,
+        "as_of_date": datetime.now().strftime("%Y-%m-%d"),
+        "usd_rates_available": bool(usd_rates),
+        "segments": valores_segments,
+        "totals": valores_totals,
+    }
+    if ost_valores is not None:
+        valores_payload["ost_sin_marco"] = ost_valores
+    valores_path = output_dir / f"valores_migracion_{operation}.json"
+    valores_path.write_text(json.dumps(valores_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Valores USD escritos en: {valores_path.relative_to(ROOT).as_posix()}", flush=True)
 
     source_files = [stat.source_file for stat in load_result.file_stats if not stat.skipped]
     summary_path = write_summary_markdown(
