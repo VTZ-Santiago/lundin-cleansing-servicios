@@ -824,7 +824,9 @@ def run(
     # lógica de migración.
     ost_valores: dict | None = None
     if export_entregables and contratos_export_cols and operation == "CCMC":
-        registry_path = find_registry(ROOT / "tmp")
+        registry_path = find_registry(ROOT / "inputs" / "CCMC")
+        if registry_path is None:
+            registry_path = find_registry(ROOT / "tmp")
         if registry_path is not None:
             ost_df = build_missing_ost_vigentes(
                 master, migra_documents, registry_path, contratos_export_cols

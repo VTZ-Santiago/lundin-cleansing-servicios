@@ -1,0 +1,52 @@
+MAPEO DIRECTO: BASES DE DATOS DE inputs/ -> ENTREGABLES
+
+1) CONTRATOS / ORDENES DE SERVICIO (CCMC)
+Inputs usados:
+- inputs/CCMC/ordenes-compra/*.xlsx
+- inputs/CCMC/suministros-ordenes-compra/*.xlsx
+- inputs/CCMC/CONTRATOS VIGENTES CCMC *.xlsx
+- inputs/CCMC/Sitio Candelaria_CTO-OST Vigentes.xlsx
+
+Entregables generados:
+- outputs/entregables/OC_migra_contratos_CCMC.xlsx
+- outputs/entregables/OC_vencidos_saldo_contratos_CCMC.xlsx
+- outputs/entregables/OC_migra_ordenes_servicio_CCMC.xlsx
+- outputs/entregables/OC_vencidos_saldo_ordenes_servicio_CCMC.xlsx
+
+2) CONTRATOS / ORDENES DE SERVICIO (MLCC)
+Inputs usados:
+- inputs/MLCC/ordenes-compra/*.xlsx
+- inputs/MLCC/suministros-ordenes-compra/*.xlsx
+- inputs/Reporte Contratos Vigentes *.xlsx
+- inputs/MLCC/CONTRATOS VIGENTES MLCC *.xlsx
+- inputs/MLCC/Sitio Caserones_BD*.xlsx
+
+Entregables generados:
+- outputs/entregables/OC_migra_contratos_MLCC.xlsx
+- outputs/entregables/OC_vencidos_saldo_contratos_MLCC.xlsx
+- outputs/entregables/OC_migra_ordenes_servicio_MLCC.xlsx
+- outputs/entregables/OC_vencidos_saldo_ordenes_servicio_MLCC.xlsx
+
+3) SUMINISTROS
+Inputs usados:
+- inputs/CCMC/suministros-ordenes-compra/*.xlsx
+- inputs/MLCC/suministros-ordenes-compra/*.xlsx
+
+Entregables / reportes que alimentan presentacion:
+- outputs/reportes/suministros_ccmc_*.xlsx
+- outputs/reportes/suministros_mlcc_*.xlsx
+
+4) PRESENTACION EJECUTIVA
+Inputs usados (directos):
+- inputs/Estadistica de OC.xlsx
+
+Entradas de proceso (no en inputs/, son salidas intermedias):
+- outputs/control_points/resumen_segmentacion_CCMC.md
+- outputs/control_points/resumen_segmentacion_MLCC.md
+- outputs/control_points/valores_migracion_CCMC.json
+- outputs/control_points/valores_migracion_MLCC.json
+- outputs/reportes/suministros_ccmc_*.xlsx
+- outputs/reportes/suministros_mlcc_*.xlsx
+
+Entregable generado:
+- outputs/entregables/presentacion_servicios_YYYYMMDD_v1.pptx

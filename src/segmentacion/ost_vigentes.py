@@ -6,7 +6,7 @@ cruce de vigencia del flujo principal no las captura, aquí se identifican las
 que NO están ya en los entregables que migran y se enriquecen con la base OC
 para anexarlas como una hoja extra del entregable de contratos.
 
-Solo aplica a CCMC y solo si existe el registro en `tmp/` con la hoja
+Solo aplica a CCMC y solo si existe el registro en `inputs/CCMC/` con la hoja
 "OS Vigentes". No toca controles ni la lógica de migración del flujo.
 """
 from __future__ import annotations
@@ -40,10 +40,10 @@ def _norm_key(value: object) -> str:
     return text
 
 
-def find_registry(tmp_dir: Path) -> Path | None:
-    """Devuelve el xlsx en tmp/ que contenga la hoja 'OS Vigentes' (más reciente)."""
+def find_registry(source_dir: Path) -> Path | None:
+    """Devuelve el xlsx en una carpeta fuente que contenga la hoja 'OS Vigentes' (más reciente)."""
     candidates = sorted(
-        (p for p in tmp_dir.glob("*Vigentes*.xlsx") if not p.name.startswith("~$")),
+        (p for p in source_dir.glob("*Vigentes*.xlsx") if not p.name.startswith("~$")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )

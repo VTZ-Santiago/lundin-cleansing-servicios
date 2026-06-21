@@ -2073,7 +2073,9 @@ def generate_project_presentation(
     project_root = output_root.parent
     mlcc_stats_path = output_root / "ordenes_compra" / "reporte_estadistico_MLCC-PO.xlsx"
     ccmc_stats_path = output_root / "ordenes_compra" / "reporte_estadistico_CCMC-PO.xlsx"
-    tmp_stats_path = project_root / "tmp" / "Estadistica de OC.xlsx"
+    tmp_stats_path = project_root / "inputs" / "Estadistica de OC.xlsx"
+    if not tmp_stats_path.exists():
+        tmp_stats_path = project_root / "tmp" / "Estadistica de OC.xlsx"
 
     prs = Presentation(str(template_path))
     mlcc_summary = parse_summary_markdown(mlcc_summary_path)
