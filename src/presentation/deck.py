@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -29,6 +30,43 @@ RED = RGBColor.from_string("BE123C")
 RED_LIGHT = RGBColor.from_string("FFE4E6")
 PURPLE = RGBColor.from_string("4C1D95")
 PURPLE_LIGHT = RGBColor.from_string("EDE9FE")
+TEAL = RGBColor.from_string("0E7490")
+TEAL_LIGHT = RGBColor.from_string("CFFAFE")
+
+# Secondary accent used consistently for "tipo de posición" en ambas operaciones
+# (la operación marca el color primario: MLCC azul, CCMC verde).
+POS_ACCENT = ORANGE
+POS_ACCENT_LIGHT = ORANGE_LIGHT
+
+# Nombre legible de cada tipo de posición SAP (letra canónica del loader).
+POS_TYPE_LABELS: dict[str, str] = {
+    "D": "Servicio (D)",
+    "L": "Subcontratación (L)",
+    "C": "Consignación (C)",
+    "K": "Consignación (K)",
+    "V": "Traslado (V)",
+    "U": "Traslado (U)",
+    "P": "Tope / límite (P)",
+    "Sin tipo": "Estándar / Stock",
+}
+
+
+def _pos_type_label(code: str) -> str:
+    code = (code or "").strip()
+    if not code:
+        return POS_TYPE_LABELS["Sin tipo"]
+    return POS_TYPE_LABELS.get(code, code)
+
+
+def _fmt_usd(value: float) -> str:
+    """USD compacto para tarjetas/tablas: USD 1400,0MM / USD 98,5MM / USD 720K."""
+    if value is None or value <= 0.0:
+        return "—"
+    if value >= 1_000_000:
+        return f"USD {value / 1_000_000:.1f}MM".replace(".", ",")
+    if value >= 1_000:
+        return f"USD {value / 1_000:.0f}K"
+    return f"USD {value:.0f}"
 
 
 @dataclass
@@ -121,10 +159,40 @@ class SupplySegmentRow:
     vigente_rows: int = 0
     vcs_rows: int = 0
     vss_rows: int = 0
+    vigente_usd: float = 0.0
+    vcs_usd: float = 0.0
 
     @property
     def total_rows(self) -> int:
         return self.vigente_rows + self.vcs_rows + self.vss_rows
+
+
+@dataclass
+class SegmentValor:
+    label: str = ""
+    c2_rows: int = 0
+    c2_usd: float = 0.0
+    vencidos_rows: int = 0
+    vencidos_usd: float = 0.0
+
+
+@dataclass
+class MigracionValores:
+    """Valores en USD del universo D (Contratos / Órdenes de Servicio).
+
+    Se leen del sidecar outputs/control_points/valores_migracion_<OP>.json escrito
+    por run_segmentacion_mlcc.py.
+    """
+    operation: str = ""
+    contratos: SegmentValor = field(default_factory=SegmentValor)
+    ordenes_servicio: SegmentValor = field(default_factory=SegmentValor)
+    total_c2_rows: int = 0
+    total_c2_usd: float = 0.0
+    total_vencidos_rows: int = 0
+    total_vencidos_usd: float = 0.0
+    ost_rows: int = 0
+    ost_usd: float = 0.0
+    usd_available: bool = False
 
 
 @dataclass
@@ -403,6 +471,34 @@ def _load_po_stats(path: Path, operation: str) -> POStats:
     return data
 
 
+def _load_universo_oc(output_root: Path, operation: str) -> POStats | None:
+    """Construye POStats desde outputs/control_points/universo_oc_<OP>.json.
+
+    Ese sidecar cuenta tipos de posición y clases documentales sobre el TOTAL de
+    posiciones (OC totales), con el loader vigente de la segmentación — a
+    diferencia del reporte estadístico, que agrega por documento y está fechado.
+    Devuelve None si el sidecar no existe (el deck cae al reporte estadístico).
+    """
+    path = output_root / "control_points" / f"universo_oc_{operation}.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    data = POStats(operation=operation)
+    data.periods = [str(p) for p in payload.get("periods", []) if str(p).strip()]
+    data.total_positions = _as_int(payload.get("total_positions"))
+    data.unique_documents = _as_int(payload.get("unique_documents"))
+    data.framework_contracts = _as_int(payload.get("framework_contracts"))
+    data.po_with_framework = _as_int(payload.get("po_with_framework"))
+    data.po_without_framework = _as_int(payload.get("po_without_framework"))
+    data.pct_po_with_framework = _as_float(payload.get("pct_po_with_framework"))
+    data.doc_classes = {str(k): _as_int(v) for k, v in (payload.get("by_doc_class") or {}).items()}
+    data.position_types = {str(k): _as_int(v) for k, v in (payload.get("by_position_type") or {}).items()}
+    return data
+
+
 def _load_temp_snapshot(path: Path, operation: str) -> TempOCSnapshot:
     snapshot = TempOCSnapshot(operation=operation)
     if not path.exists():
@@ -541,6 +637,7 @@ def _load_suministros_segments(output_root: Path, operation: str) -> list[Supply
     col_seg = idx.get("Sub-bloque")
     col_cat = idx.get("Categoría migración")
     col_rows = idx.get("Filas")
+    col_usd = idx.get("Valor USD")
     if col_seg is None or col_cat is None or col_rows is None:
         workbook.close()
         return []
@@ -552,16 +649,55 @@ def _load_suministros_segments(output_root: Path, operation: str) -> list[Supply
         if not seg or seg == "TOTAL" or cat.startswith("SUBTOTAL") or not cat:
             continue
         filas = _as_int(ws.cell(row, col_rows + 1).value)
+        usd = _as_float(ws.cell(row, col_usd + 1).value) if col_usd is not None else 0.0
         entry = by_seg.setdefault(seg, SupplySegmentRow(segment=seg))
         if cat == "VIGENTE":
             entry.vigente_rows = filas
+            entry.vigente_usd = usd
         elif cat == "NO_VIGENTE_CON_SALDO":
             entry.vcs_rows = filas
+            entry.vcs_usd = usd
         elif cat == "NO_VIGENTE_SIN_SALDO":
             entry.vss_rows = filas
 
     workbook.close()
     return list(by_seg.values())
+
+
+def _load_valores_migracion(output_root: Path, operation: str) -> MigracionValores:
+    """Lee outputs/control_points/valores_migracion_<OP>.json (USD del universo D)."""
+    data = MigracionValores(operation=operation)
+    path = output_root / "control_points" / f"valores_migracion_{operation}.json"
+    if not path.exists():
+        return data
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return data
+
+    def _seg(node: dict) -> SegmentValor:
+        return SegmentValor(
+            label=_as_text(node.get("label")),
+            c2_rows=_as_int(node.get("c2_rows")),
+            c2_usd=_as_float(node.get("c2_usd")),
+            vencidos_rows=_as_int(node.get("vencidos_rows")),
+            vencidos_usd=_as_float(node.get("vencidos_usd")),
+        )
+
+    segments = payload.get("segments", {})
+    data.contratos = _seg(segments.get("contratos", {}))
+    data.ordenes_servicio = _seg(segments.get("ordenes_servicio", {}))
+    totals = payload.get("totals", {})
+    data.total_c2_rows = _as_int(totals.get("c2_rows"))
+    data.total_c2_usd = _as_float(totals.get("c2_usd"))
+    data.total_vencidos_rows = _as_int(totals.get("vencidos_rows"))
+    data.total_vencidos_usd = _as_float(totals.get("vencidos_usd"))
+    ost = payload.get("ost_sin_marco")
+    if isinstance(ost, dict):
+        data.ost_rows = _as_int(ost.get("rows"))
+        data.ost_usd = _as_float(ost.get("usd"))
+    data.usd_available = bool(payload.get("usd_rates_available"))
+    return data
 
 
 def _load_suministros_plants(output_root: Path, operation: str) -> list[PlantRow]:
@@ -656,7 +792,7 @@ def _characterization_lines(criteria: dict[str, SegmentCriteria]) -> list[str]:
         entry = criteria.get(segment_id)
         if entry is None:
             continue
-        parts = [f"tipo posición {entry.position_type or 'D'}"]
+        parts = ["posiciones de servicio"]
         if entry.marco:
             parts.append(entry.marco)
         if entry.doc_classes:
@@ -665,12 +801,12 @@ def _characterization_lines(criteria: dict[str, SegmentCriteria]) -> list[str]:
 
     if not lines:
         lines = [
-            "Contratos — tipo posición D · con contrato marco",
-            "Órdenes de Servicio — tipo posición D · sin contrato marco",
+            "Contratos — posiciones de servicio con contrato marco",
+            "Órdenes de Servicio — posiciones de servicio sin contrato marco",
         ]
     lines.append(
-        "Criterios de la hoja CASERONES (planta 8000); en CCMC la apertura usa la presencia de contrato marco. "
-        "Bloque de órdenes de servicio de reparación (tipo L) excluido."
+        "En CCMC la separación entre Contratos y Órdenes de Servicio usa la presencia de contrato marco. "
+        "Las posiciones de reparación con contrato marco quedan fuera de este universo."
     )
     return lines
 
@@ -696,28 +832,57 @@ def _set_shape_text(shape, text: str) -> None:
     run.text = text
 
 
+def _set_run_text_preserve(shape, text: str) -> None:
+    """Cambia el texto conservando el formato del primer run (color/tamaño)."""
+    paragraph = shape.text_frame.paragraphs[0]
+    runs = paragraph.runs
+    if runs:
+        runs[0].text = text
+        for extra in runs[1:]:
+            extra.text = ""
+    else:
+        run = paragraph.add_run()
+        run.text = text
+
+
 def _update_cover_slide(slide, generated_on: date) -> None:
+    date_pattern = re.compile(r"^\d{1,2}\s+[A-Za-zÁÉÍÓÚÑáéíóúñ]+\s+\d{4}$")
+    subtitle_done = False
     for shape in slide.shapes:
         if not getattr(shape, "has_text_frame", False):
             continue
         text = shape.text.strip()
-        if text == "Data Cleansing":
-            _set_shape_text(shape, "Data Cleansing Servicios")
-        elif text == "30 ABRIL\xa02026":
-            _set_shape_text(shape, f"{generated_on.day:02d} {_month_name_es(generated_on)} {generated_on.year}")
+        normalized = text.replace("\xa0", " ")
+        if normalized.startswith("Data Cleansing"):
+            _set_run_text_preserve(shape, "Data Cleansing · Servicios")
+        elif date_pattern.match(normalized):
+            _set_run_text_preserve(shape, f"{generated_on.day:02d} {_month_name_es(generated_on)} {generated_on.year}")
+        elif "Hallazgos" in normalized or "órdenes de compra" in normalized.lower():
+            _set_run_text_preserve(shape, "Bases de datos · Método · Suministros · Contratos y Órdenes de Servicio · Registros de compras")
+            subtitle_done = True
 
-    subtitle = slide.shapes.add_textbox(Inches(0.95), Inches(4.65), Inches(7.2), Inches(0.72))
-    subtitle_frame = subtitle.text_frame
-    subtitle_frame.clear()
-    subtitle_frame.word_wrap = True
-    paragraph = subtitle_frame.paragraphs[0]
-    run = paragraph.add_run()
-    run.text = "Hallazgos vigentes sobre órdenes de compra, contratos y órdenes de servicio"
-    run.font.size = Pt(18)
-    run.font.color.rgb = CHARCOAL
+    if not subtitle_done:
+        subtitle = slide.shapes.add_textbox(Inches(0.95), Inches(4.65), Inches(8.2), Inches(0.72))
+        subtitle_frame = subtitle.text_frame
+        subtitle_frame.clear()
+        subtitle_frame.word_wrap = True
+        paragraph = subtitle_frame.paragraphs[0]
+        run = paragraph.add_run()
+        run.text = "Bases de datos · Método · Suministros · Contratos y Órdenes de Servicio · Registros de compras"
+        run.font.size = Pt(16)
+        run.font.color.rgb = CHARCOAL
 
 
-def _add_header(slide, slide_width: int, title: str, subtitle: str | None = None) -> None:
+# Etiqueta de sección que se muestra en el kicker del encabezado.
+SECTION_INTRO = "Servicios"
+SECTION_BASES = "Bases de datos"
+SECTION_METODO = "Método y criterios para migración"
+SECTION_CONTRATOS = "Contratos y Órdenes de Servicio"
+SECTION_SUMINISTROS = "Suministros"
+SECTION_PIR = "Registros de compras (PIR)"
+
+
+def _add_header(slide, slide_width: int, title: str, subtitle: str | None = None, section: str = SECTION_INTRO) -> None:
     banner = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.RECTANGLE,
         Inches(0),
@@ -729,13 +894,13 @@ def _add_header(slide, slide_width: int, title: str, subtitle: str | None = None
     banner.fill.fore_color.rgb = ORANGE
     banner.line.fill.background()
 
-    kicker = slide.shapes.add_textbox(Inches(0.55), Inches(0.07), Inches(3.25), Inches(0.22))
+    kicker = slide.shapes.add_textbox(Inches(0.55), Inches(0.07), Inches(9.0), Inches(0.24))
     kicker_frame = kicker.text_frame
     kicker_frame.clear()
     paragraph = kicker_frame.paragraphs[0]
     run = paragraph.add_run()
-    run.text = "Data Cleansing | Avance General"
-    run.font.size = Pt(13)
+    run.text = f"Data Cleansing  ·  {section}".upper()
+    run.font.size = Pt(12)
     run.font.bold = True
     run.font.color.rgb = RGBColor(255, 255, 255)
 
@@ -927,7 +1092,7 @@ def _add_bar_box(
 
     for index, (label, value) in enumerate(clean_items):
         current_top = top + 0.52 + index * row_height
-        label_box = slide.shapes.add_textbox(Inches(left + 0.18), Inches(current_top), Inches(1.5), Inches(0.22))
+        label_box = slide.shapes.add_textbox(Inches(left + 0.18), Inches(current_top), Inches(2.0), Inches(0.22))
         label_frame = label_box.text_frame
         label_frame.clear()
         paragraph = label_frame.paragraphs[0]
@@ -937,8 +1102,8 @@ def _add_bar_box(
         run.font.bold = True
         run.font.color.rgb = CHARCOAL
 
-        bar_left = left + 1.6
-        bar_width = width - 2.7
+        bar_left = left + 2.1
+        bar_width = width - 3.2
         bg_bar = slide.shapes.add_shape(
             MSO_AUTO_SHAPE_TYPE.RECTANGLE,
             Inches(bar_left),
@@ -1008,49 +1173,222 @@ def _get_segment(summary: OperationSummary, token: str) -> SegmentStats:
     raise KeyError(f"No se encontro el segmento '{token}' en {summary.operation}")
 
 
-def _add_findings_slide(
-    prs: Presentation,
-    mlcc_summary: OperationSummary,
-    ccmc_summary: OperationSummary,
-    mlcc_stats: POStats,
-    ccmc_stats: POStats,
-    mlcc_tmp: TempOCSnapshot,
-) -> None:
+def _add_index_slide(prs: Presentation) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
-    total_positions = mlcc_stats.total_positions + ccmc_stats.total_positions
-    total_framework = mlcc_stats.po_with_framework + ccmc_stats.po_with_framework
-    total_segmented = mlcc_summary.classified_rows + ccmc_summary.classified_rows
-    contracts_total = _get_segment(mlcc_summary, "Contrato").c1_rows + _get_segment(ccmc_summary, "Contrato").c1_rows
-    services_total = _get_segment(mlcc_summary, "Servicio").c1_rows + _get_segment(ccmc_summary, "Servicio").c1_rows
-
     _add_header(
         slide,
         prs.slide_width,
-        "Hallazgos principales",
-        "La lectura se centra en OC y conteos absolutos; se dejan fuera las tasas de no migración de la versión anterior.",
+        "Contenido",
+        "Cómo está organizada esta presentación.",
+        section=SECTION_INTRO,
     )
-    _add_card(slide, 0.78, 2.05, 5.45, 1.75, "Posiciones de OC", _format_int(total_positions), "Cobertura combinada 2007-2026 en MLCC y CCMC", BLUE_LIGHT, BLUE)
-    _add_card(slide, 6.55, 2.05, 5.95, 1.75, "OC con contrato marco", _format_int(total_framework), f"{_format_int(ccmc_stats.po_with_framework)} CCMC | {_format_int(mlcc_stats.po_with_framework)} MLCC", GREEN_LIGHT, GREEN)
-    _add_card(slide, 0.78, 4.2, 5.45, 1.75, "Posiciones segmentadas", _format_int(total_segmented), f"{_format_int(contracts_total)} contratos | {_format_int(services_total)} órdenes de servicio", ORANGE_LIGHT, ORANGE)
-    _add_card(slide, 6.55, 4.2, 5.95, 1.75, "Base MLCC sin posiciones D", _format_int(mlcc_tmp.total_base), f"{_format_int(mlcc_tmp.type_counts.get('Vacio', 0))} registros sin tipo de posición", PURPLE_LIGHT, PURPLE)
-    _add_footnote(slide, "Fuentes: reporte estadístico de OC, resúmenes de segmentación y estadística ad hoc de OC.")
+    sections = [
+        ("1", "Entregables", "Paquete de salidas por bloque de negocio y propósito de uso."),
+        ("2", "Bases de datos", "Universo de órdenes de compra y estructura por operación."),
+        ("3", "Método y criterios para migración", "Cómo se decide qué migra: vigencia, saldo y rotulación."),
+        ("4", "Suministros", "Stock, Consignación, Reparación y Traslado: vigencia, valor y apertura."),
+        ("5", "Contratos y Órdenes de Servicio", "Resultados de migración y valor (USD) por operación."),
+        ("6", "Registros de compras (PIR)", "Registros de información de compras (consignación y pipeline)."),
+    ]
+    top = 2.05
+    for number, title, desc in sections:
+        _add_step_box(slide, 0.9, top, 11.5, 0.82, number, f"{title}  —  {desc}", GRAY_LIGHT, ORANGE)
+        top += 0.95
+    _add_footnote(slide, "Data Cleansing · Servicios — MLCC (Caserones) y CCMC (Candelaria).")
 
 
-def _add_universe_slide(prs: Presentation, mlcc_stats: POStats, ccmc_stats: POStats) -> None:
+def _add_intro_alcance_slide(prs: Presentation) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        "Aumento de alcance del servicio",
+        "Identificación y limpieza de paquetes de datos en SAP, más allá del alcance original licitado.",
+        section=SECTION_INTRO,
+    )
+    _add_callout_box(
+        slide, 0.78, 2.0, 11.44, 1.2,
+        "El encargo",
+        [
+            "Se incorporan tareas de identificación y limpieza en SAP de los datos de servicios, "
+            "compras, bodega e ingeniería de materiales.",
+            "Esta presentación se concentra en Suministros, Contratos y Órdenes de Servicio, y Registros de Compras (PIR).",
+        ],
+        BLUE_LIGHT, BLUE, font_size=12,
+    )
+    areas = [
+        ("Convenios", "Materiales ZZ, duplicados o sin movimiento, convenios vigentes sin uso y contratos vencidos con saldo."),
+        ("Órdenes de Compra", "Material catalogado y cargo directo: entregas vencidas, sin Incoterm y con atrasos a concluir."),
+        ("Órdenes de Servicio", "OS vencidas con saldo, HES pendientes y OS vigentes sin movimiento."),
+        ("PR / SOLPED · Reservas", "Solicitudes de servicios y materiales ya innecesarios, y reservas sin utilización."),
+    ]
+    top = 3.4
+    for title, desc in areas:
+        _add_callout_box(slide, 0.78, top, 11.44, 0.78, title, [desc], GRAY_LIGHT, CHARCOAL, font_size=11)
+        top += 0.88
+    _add_footnote(slide, "Fuente: Aumento de alcance — Servicios de Data Cleansing (Vantaz Analytics).")
+
+
+def _add_entregables_slide(prs: Presentation) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        "Entregables",
+        "Paquete de salidas operativas para migración y seguimiento.",
+        section=SECTION_INTRO,
+    )
+
+    rows = [
+        ["Bloque", "Entregable", "Contenido", "Ubicación"],
+        ["Contratos / OS", "OC_migra_contratos_{OP}.xlsx", "Posiciones vigentes que migran a SAP.", "outputs/entregables/"],
+        ["Contratos / OS", "OC_migra_ordenes_servicio_{OP}.xlsx", "Órdenes de servicio vigentes a migrar.", "outputs/entregables/"],
+        ["Contratos / OS", "OC_vencidos_saldo_contratos_{OP}.xlsx", "Contratos vencidos con saldo para seguimiento.", "outputs/entregables/"],
+        ["Contratos / OS", "OC_vencidos_saldo_ordenes_servicio_{OP}.xlsx", "OS vencidas con saldo para seguimiento.", "outputs/entregables/"],
+        ["Suministros", "suministros_{op}_*.xlsx", "Clasificación vigente / vencido con saldo / vencido sin saldo.", "outputs/reportes/"],
+        ["Suministros", "resumen_segmentacion_{OP}.md", "Resumen ejecutivo por operación para trazabilidad.", "outputs/control_points/"],
+        ["Presentación", "presentacion_servicios_YYYYMMDD_v1.pptx", "Síntesis ejecutiva consolidada del servicio.", "outputs/entregables/"],
+    ]
+    _add_table(slide, rows, 0.78, 2.05, 11.44, 2.95, [1.8, 3.0, 4.05, 2.59])
+
+    _add_callout_box(
+        slide, 0.78, 5.25, 11.44, 1.2,
+        "Notas de entrega",
+        [
+            "{OP} representa MLCC y CCMC. Las salidas se publican por operación para uso directo de migración.",
+            "Los archivos con prefijo LAST corresponden a personalizaciones manuales y no se sobrescriben en la generación estándar.",
+        ],
+        GRAY_LIGHT, CHARCOAL, font_size=11,
+    )
+    _add_footnote(slide, "Cada entregable conserva trazabilidad hacia las bases de control_points y reportes operativos.")
+
+
+def _add_resumen_ejecutivo_slide(
+    prs: Presentation,
+    mlcc_val: MigracionValores,
+    ccmc_val: MigracionValores,
+    mlcc_comp: SuministrosData,
+    ccmc_comp: SuministrosData,
+) -> None:
+    """Resumen ejecutivo: cifras finales (USD) consolidadas solo por operación.
+
+    Migra a SAP = C2 de Contratos + C2 de Órdenes de Servicio + Suministros vigente.
+    Vencidos con saldo = vencidos de Contratos/OS + Suministros con saldo (seguimiento).
+    Sin más apertura que MLCC y CCMC.
+    """
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        "Resumen ejecutivo",
+        "Resultado consolidado del data cleansing de Servicios — cifras finales por operación.",
+        section=SECTION_INTRO,
+    )
+
+    mlcc_con_migra_usd = mlcc_val.total_c2_usd
+    ccmc_con_migra_usd = ccmc_val.total_c2_usd
+    mlcc_con_migra_rows = mlcc_val.total_c2_rows
+    ccmc_con_migra_rows = ccmc_val.total_c2_rows
+    mlcc_con_venc_usd = mlcc_val.total_vencidos_usd
+    ccmc_con_venc_usd = ccmc_val.total_vencidos_usd
+    mlcc_con_venc_rows = mlcc_val.total_vencidos_rows
+    ccmc_con_venc_rows = ccmc_val.total_vencidos_rows
+
+    mlcc_sum_migra_usd = mlcc_comp.vigente_usd
+    ccmc_sum_migra_usd = ccmc_comp.vigente_usd
+    mlcc_sum_migra_rows = mlcc_comp.vigente_rows
+    ccmc_sum_migra_rows = ccmc_comp.vigente_rows
+    mlcc_sum_venc_usd = mlcc_comp.vcs_usd
+    ccmc_sum_venc_usd = ccmc_comp.vcs_usd
+    mlcc_sum_venc_rows = mlcc_comp.vcs_rows
+    ccmc_sum_venc_rows = ccmc_comp.vcs_rows
+
+    mlcc_migra_usd = mlcc_con_migra_usd + mlcc_sum_migra_usd
+    ccmc_migra_usd = ccmc_con_migra_usd + ccmc_sum_migra_usd
+    mlcc_migra_rows = mlcc_con_migra_rows + mlcc_sum_migra_rows
+    ccmc_migra_rows = ccmc_con_migra_rows + ccmc_sum_migra_rows
+    mlcc_venc_usd = mlcc_con_venc_usd + mlcc_sum_venc_usd
+    ccmc_venc_usd = ccmc_con_venc_usd + ccmc_sum_venc_usd
+    mlcc_venc_rows = mlcc_con_venc_rows + mlcc_sum_venc_rows
+    ccmc_venc_rows = ccmc_con_venc_rows + ccmc_sum_venc_rows
+
+    total_migra_usd = mlcc_migra_usd + ccmc_migra_usd
+    total_venc_usd = mlcc_venc_usd + ccmc_venc_usd
+    total_migra_rows = mlcc_migra_rows + ccmc_migra_rows
+    total_venc_rows = mlcc_venc_rows + ccmc_venc_rows
+    total_con_migra_usd = mlcc_con_migra_usd + ccmc_con_migra_usd
+    total_con_migra_rows = mlcc_con_migra_rows + ccmc_con_migra_rows
+    total_con_venc_usd = mlcc_con_venc_usd + ccmc_con_venc_usd
+    total_con_venc_rows = mlcc_con_venc_rows + ccmc_con_venc_rows
+    total_sum_migra_usd = mlcc_sum_migra_usd + ccmc_sum_migra_usd
+    total_sum_migra_rows = mlcc_sum_migra_rows + ccmc_sum_migra_rows
+    total_sum_venc_usd = mlcc_sum_venc_usd + ccmc_sum_venc_usd
+    total_sum_venc_rows = mlcc_sum_venc_rows + ccmc_sum_venc_rows
+
+    _add_metric_panel(
+        slide, 0.78, 2.0, 5.72, 1.22, "Migra a SAP", _fmt_usd(total_migra_usd),
+        f"{_format_int(total_migra_rows)} posiciones vigentes · Contratos, OS y Suministros",
+        GREEN_LIGHT, GREEN, value_pt=30,
+    )
+    _add_metric_panel(
+        slide, 6.62, 2.0, 5.6, 1.22, "Vencidos con saldo", _fmt_usd(total_venc_usd),
+        f"{_format_int(total_venc_rows)} posiciones · se trasladan como seguimiento",
+        POS_ACCENT_LIGHT, POS_ACCENT, value_pt=30,
+    )
+
+    rows = [
+        ["Operación", "Bloque", "Migra a SAP (USD)", "Posiciones", "Vencidos c/ saldo (USD)", "Posiciones"],
+        ["MLCC", "Contratos / OS", _fmt_usd(mlcc_con_migra_usd), _format_int(mlcc_con_migra_rows), _fmt_usd(mlcc_con_venc_usd), _format_int(mlcc_con_venc_rows)],
+        ["MLCC", "Suministros", _fmt_usd(mlcc_sum_migra_usd), _format_int(mlcc_sum_migra_rows), _fmt_usd(mlcc_sum_venc_usd), _format_int(mlcc_sum_venc_rows)],
+        ["CCMC", "Contratos / OS", _fmt_usd(ccmc_con_migra_usd), _format_int(ccmc_con_migra_rows), _fmt_usd(ccmc_con_venc_usd), _format_int(ccmc_con_venc_rows)],
+        ["CCMC", "Suministros", _fmt_usd(ccmc_sum_migra_usd), _format_int(ccmc_sum_migra_rows), _fmt_usd(ccmc_sum_venc_usd), _format_int(ccmc_sum_venc_rows)],
+        ["Total", "Contratos / OS", _fmt_usd(total_con_migra_usd), _format_int(total_con_migra_rows), _fmt_usd(total_con_venc_usd), _format_int(total_con_venc_rows)],
+        ["Total", "Suministros", _fmt_usd(total_sum_migra_usd), _format_int(total_sum_migra_rows), _fmt_usd(total_sum_venc_usd), _format_int(total_sum_venc_rows)],
+    ]
+    _add_table(slide, rows, 0.78, 3.45, 11.45, 2.45, [1.45, 2.1, 2.15, 1.3, 3.05, 1.4])
+
+    lines = [
+        "Se clasificó el universo de OC de ambas operaciones (Suministros, Contratos y Órdenes de Servicio) y se "
+        "determinó qué migra a SAP según vigencia (fecha de término) y saldo pendiente, valorizado en USD.",
+        "MLCC ahora considera todas sus plantas en Contratos y Órdenes de Servicio (se retiró el filtro por planta 8000).",
+        f"Migran {_fmt_usd(total_migra_usd)} a SAP; adicionalmente {_fmt_usd(total_venc_usd)} en posiciones vencidas con "
+        "saldo se trasladan como seguimiento.",
+    ]
+    _add_callout_box(slide, 0.78, 6.0, 11.44, 1.1, "Método", lines, GRAY_LIGHT, CHARCOAL, font_size=10)
+    _add_footnote(slide, "USD = valor pendiente convertido a dólares. El detalle por segmento y planta se presenta en las secciones siguientes.")
+
+
+def _add_universe_slide(
+    prs: Presentation,
+    mlcc_stats: POStats,
+    ccmc_stats: POStats,
+    mlcc_val: MigracionValores,
+    ccmc_val: MigracionValores,
+    mlcc_comp: SuministrosData,
+    ccmc_comp: SuministrosData,
+) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
     total_positions = mlcc_stats.total_positions + ccmc_stats.total_positions
     total_documents = mlcc_stats.unique_documents + ccmc_stats.unique_documents
     total_framework = mlcc_stats.po_with_framework + ccmc_stats.po_with_framework
+    pct_marco = (total_framework / total_documents * 100.0) if total_documents else 0.0
+    total_migra_usd = (
+        mlcc_val.total_c2_usd + ccmc_val.total_c2_usd
+        + mlcc_val.total_vencidos_usd + ccmc_val.total_vencidos_usd
+        + mlcc_comp.vigente_usd + ccmc_comp.vigente_usd
+        + mlcc_comp.vcs_usd + ccmc_comp.vcs_usd
+    )
     _add_header(
         slide,
         prs.slide_width,
-        "Universo de OC analizado",
-        "Cobertura por operación y períodos considerados, sin detallar archivos fuente.",
+        "Universo de órdenes de compra",
+        "Cobertura combinada MLCC + CCMC · período 2007–2026.",
+        section=SECTION_BASES,
     )
-    _add_card(slide, 0.78, 2.0, 2.65, 1.4, "Posiciones de OC", _format_int(total_positions), "Posiciones del universo consolidado", BLUE_LIGHT, BLUE)
+    _add_card(slide, 0.78, 2.0, 2.65, 1.4, "Posiciones de OC", _format_int(total_positions), "Universo consolidado MLCC + CCMC", BLUE_LIGHT, BLUE)
     _add_card(slide, 3.58, 2.0, 2.65, 1.4, "Documentos únicos", _format_int(total_documents), "Documentos de compra distintos", GREEN_LIGHT, GREEN)
-    _add_card(slide, 6.38, 2.0, 2.65, 1.4, "OC con marco", _format_int(total_framework), "Documentos con contrato marco asociado", ORANGE_LIGHT, ORANGE)
-    _add_card(slide, 9.18, 2.0, 3.05, 1.4, "Período cubierto", "2007-2026", "MLCC 2010-2026 | CCMC 2007-2026", PURPLE_LIGHT, PURPLE)
+    _add_card(slide, 6.38, 2.0, 2.65, 1.4, "OC con contrato marco", _format_int(total_framework), f"{_format_pct(pct_marco)} de los documentos", POS_ACCENT_LIGHT, POS_ACCENT)
+    _add_card(slide, 9.18, 2.0, 3.05, 1.4, "Valor a migrar (USD)", _fmt_usd(total_migra_usd), "Contratos, OS y Suministros que migran", PURPLE_LIGHT, PURPLE)
 
     rows = [
         ["Operación", "Períodos", "Posiciones OC", "Documentos", "Con marco", "Sin marco"],
@@ -1071,39 +1409,44 @@ def _add_universe_slide(prs: Presentation, mlcc_stats: POStats, ccmc_stats: POSt
             _format_int(ccmc_stats.po_without_framework),
         ],
     ]
-    _add_table(slide, rows, 0.78, 3.78, 11.45, 2.55, [1.25, 3.45, 1.55, 1.55, 1.35, 1.35])
-    _add_footnote(slide, "Períodos consolidados desde los reportes estadísticos oficiales de OC para MLCC y CCMC.")
+    _add_table(slide, rows, 0.78, 3.62, 11.45, 1.75, [1.25, 3.45, 1.55, 1.55, 1.35, 1.35])
+
+    findings = [
+        f"El valor que migra a SAP asciende a {_fmt_usd(total_migra_usd)} (Contratos, Órdenes de Servicio y Suministros vigentes o con saldo pendiente).",
+        f"Solo el {_format_pct(pct_marco)} de los documentos de compra cuelga de un contrato marco; el resto se evalúa por documento.",
+        f"{_format_int(total_documents)} documentos distintos a lo largo de ~20 años: el grueso del volumen son Suministros; Contratos y Órdenes de Servicio son una fracción acotada.",
+    ]
+    _add_callout_box(slide, 0.78, 5.5, 11.44, 1.35, "Lo que conviene destacar", findings, GRAY_LIGHT, CHARCOAL, font_size=10)
+    _add_footnote(slide, "Fuente: universo de OC (carga vigente MLCC + CCMC). USD = valor pendiente convertido a dólares.")
 
 
 def _operation_callout_lines(stats: POStats, snapshot: TempOCSnapshot) -> list[str]:
-    if stats.operation == "MLCC":
-        top_framework = stats.top_frameworks[0] if stats.top_frameworks else ("Sin dato", 0, 0)
-        return [
-            f"Estadística ad hoc sin posiciones D: {_format_int(snapshot.total_base)} registros",
-            f"Con código material: {_format_int(snapshot.with_material)} | Sin código material: {_format_int(snapshot.without_material)}",
-            f"Marco con mayor volumen: {top_framework[0]} con {_format_int(top_framework[1])} OC asociadas",
-        ]
-
-    top_framework = stats.top_frameworks[0] if stats.top_frameworks else ("Sin dato", 0, 0)
-    plant_summary = " | ".join(
-        f"{plant} {_format_int(value)}" for plant, value in sorted(snapshot.plant_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+    pct_marco = stats.pct_po_with_framework or (
+        (stats.po_with_framework / stats.unique_documents * 100.0) if stats.unique_documents else 0.0
     )
-    return [
-        f"Distribución por planta en estadística ad hoc: {plant_summary}",
-        f"Con código material: {_format_int(snapshot.with_material)} | Sin código material: {_format_int(snapshot.without_material)}",
-        f"Marco con mayor volumen: {top_framework[0]} con {_format_int(top_framework[1])} OC asociadas",
+    lines = [
+        f"{_format_int(stats.framework_contracts)} contratos marco distintos · {_format_int(stats.po_with_framework)} "
+        f"documentos con marco ({_format_pct(pct_marco)}) · {_format_int(stats.po_without_framework)} sin marco.",
     ]
+    top_class = stats.top_doc_classes(1)
+    if top_class:
+        cls, n = top_class[0]
+        pct = (n / stats.total_positions * 100.0) if stats.total_positions else 0.0
+        lines.append(f"Clase documental más frecuente: {cls} con {_format_int(n)} posiciones ({_format_pct(pct)}).")
+    return lines
 
 
 def _add_operation_structure_slide(prs: Presentation, stats: POStats, snapshot: TempOCSnapshot, accent: RGBColor, fill: RGBColor) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
+    nombre = "MLCC (Caserones)" if stats.operation == "MLCC" else "CCMC (Candelaria)"
     _add_header(
         slide,
         prs.slide_width,
-        f"{stats.operation} | Estructura de OC",
-        "Conteos absolutos del reporte estadístico y de la estadística ad hoc de OC.",
+        f"{nombre} — Estructura de las órdenes de compra",
+        "Contratos marco, clases documentales y tipos de posición — conteos sobre el total de OC (posiciones).",
+        section=SECTION_BASES,
     )
-    _add_card(slide, 0.78, 2.0, 3.2, 1.35, "Posiciones de OC", _format_int(stats.total_positions), "Universo inicial antes de segmentación", fill, accent)
+    _add_card(slide, 0.78, 2.0, 3.2, 1.35, "Posiciones de OC", _format_int(stats.total_positions), "Universo de la operación", fill, accent)
     _add_card(slide, 4.15, 2.0, 3.2, 1.35, "Documentos únicos", _format_int(stats.unique_documents), "Documentos de compra distintos", GREEN_LIGHT, GREEN)
     _add_card(
         slide,
@@ -1113,14 +1456,18 @@ def _add_operation_structure_slide(prs: Presentation, stats: POStats, snapshot: 
         1.35,
         "Contratos marco",
         _format_int(stats.framework_contracts),
-        f"OC con marco {_format_int(stats.po_with_framework)} | sin marco {_format_int(stats.po_without_framework)}",
-        ORANGE_LIGHT,
-        ORANGE,
+        f"OC con marco {_format_int(stats.po_with_framework)} · sin marco {_format_int(stats.po_without_framework)}",
+        PURPLE_LIGHT,
+        PURPLE,
     )
-    _add_bar_box(slide, 0.78, 3.6, 5.65, 2.35, "Clases documentales con mayor volumen", stats.top_doc_classes(5), fill, accent)
-    _add_bar_box(slide, 6.6, 3.6, 5.62, 2.35, "Tipo de posición dominante", stats.top_position_types(4), GREEN_LIGHT, GREEN)
-    _add_callout_box(slide, 0.78, 6.12, 11.44, 0.72, "Lo que aporta Estadística de OC.xlsx", _operation_callout_lines(stats, snapshot), GRAY_LIGHT, CHARCOAL, font_size=10)
-    _add_footnote(slide, f"Fuentes: reporte_estadistico_{stats.operation}-PO.xlsx y tmp/Estadistica de OC.xlsx.")
+    pos_items = [
+        (_pos_type_label(code), n)
+        for code, n in sorted(stats.position_types.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    _add_bar_box(slide, 0.78, 3.6, 5.65, 2.35, "Clases documentales · sobre OC totales", stats.top_doc_classes(6), fill, accent)
+    _add_bar_box(slide, 6.6, 3.6, 5.62, 2.35, "Tipos de posición · sobre OC totales", pos_items, POS_ACCENT_LIGHT, POS_ACCENT)
+    _add_callout_box(slide, 0.78, 6.12, 11.44, 0.78, "Lectura de la estructura", _operation_callout_lines(stats, snapshot), GRAY_LIGHT, CHARCOAL, font_size=10)
+    _add_footnote(slide, f"Fuente: universo de OC vigente de {stats.operation}. Clases y tipos contados sobre el total de posiciones.")
 
 
 def _segment_title(slide, left: float, top: float, width: float, text: str, accent: RGBColor) -> None:
@@ -1222,89 +1569,246 @@ def _add_step_box(slide, left: float, top: float, width: float, height: float, n
     run.font.color.rgb = CHARCOAL
 
 
-def _add_flow_slide(prs: Presentation, mlcc_summary: OperationSummary, ccmc_summary: OperationSummary) -> None:
+def _add_criterios_slide(prs: Presentation, criteria_lines: list[str]) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
-    contracts = _get_segment(mlcc_summary, "Contrato").c1_rows + _get_segment(ccmc_summary, "Contrato").c1_rows
-    services = _get_segment(mlcc_summary, "Servicio").c1_rows + _get_segment(ccmc_summary, "Servicio").c1_rows
-    total_seg = contracts + services
-    total_migra = sum(
-        seg.c2_rows
-        for summary in (mlcc_summary, ccmc_summary)
-        for seg in (_get_segment(summary, "Contrato"), _get_segment(summary, "Servicio"))
-    )
-
     _add_header(
         slide,
         prs.slide_width,
-        "Contratos y Órdenes de Servicio — Cómo se obtienen",
-        "Mismo flujo para MLCC y CCMC; los resultados por operación van en las láminas siguientes.",
+        "Criterios de migración",
+        "Qué migra y cómo se decide — mismo método para MLCC y CCMC.",
+        section=SECTION_METODO,
     )
 
-    steps = [
-        ("1", "Se cargan las órdenes de compra de todos los períodos de MLCC y CCMC."),
-        ("2", "Se separan las posiciones de servicio en dos grupos: Contratos (con contrato marco) y Órdenes de Servicio (sin marco)."),
-        ("3", "Cada posición se cruza con el reporte de contratos vigentes — por contrato marco o, si no hay, por documento de compra (CCMC: mayo 2026 · MLCC: abril 2026)."),
-        ("4", "Lo que tiene contrato vigente migra a SAP; lo vencido o sin contrato vigente no migra."),
-    ]
-    for (number, text), top in zip(steps, (1.95, 2.82, 3.69, 4.56)):
-        _add_step_box(slide, 0.78, top, 11.45, 0.78, number, text, GRAY_LIGHT, ORANGE)
+    _add_callout_box(
+        slide, 0.78, 2.0, 11.44, 1.7,
+        "Vigencia y saldo — la regla",
+        [
+            "Una posición MIGRA si su contrato está vigente al corte del 30 de junio de 2026.",
+            "Contratos y Órdenes de Servicio: la vigencia surge del cruce con el reporte de Contratos Vigentes "
+            "(por contrato marco; si no existe, por documento de compra).",
+            "Suministros: vigencia por fecha de entrega/validez. Si está vencida pero conserva saldo pendiente (> 0), "
+            "igual migra como caso con saldo; sin saldo pendiente, no migra.",
+        ],
+        BLUE_LIGHT, BLUE, font_size=12,
+    )
 
-    _add_card(
-        slide, 0.78, 5.58, 5.6, 1.15,
-        "Posiciones segmentadas", _format_int(total_seg),
-        f"Contratos {_format_int(contracts)} | Órdenes de servicio {_format_int(services)}",
-        BLUE_LIGHT, BLUE,
+    crit = [ln for ln in criteria_lines if ln]
+    _add_callout_box(
+        slide, 0.78, 3.85, 5.6, 2.95,
+        "Contratos y Órdenes de Servicio",
+        crit or ["Contratos — tipo servicio, con contrato marco", "Órdenes de Servicio — tipo servicio, sin contrato marco"],
+        GREEN_LIGHT, GREEN, font_size=10,
     )
-    _add_card(
-        slide, 6.63, 5.58, 5.6, 1.15,
-        "Migran a SAP", _format_int(total_migra),
-        "Posiciones con contrato vigente al corte (30 jun 2026)",
-        GREEN_LIGHT, GREEN,
+    _add_callout_box(
+        slide, 6.62, 3.85, 5.6, 2.95,
+        "Suministros — rótulos por tipo de posición",
+        [
+            "Reparación — subcontratación (tipo L)",
+            "Consignación — tipo C (MLCC) / K (CCMC)",
+            "Traslado — tipo V (MLCC) / U (CCMC)",
+            "Stock — sin tipo, con contrato marco",
+            "Cargo Directo — sin tipo, sin contrato marco",
+            "La rotulación es ortogonal a la vigencia: dentro de cada bloque hay posiciones que migran y que no.",
+        ],
+        POS_ACCENT_LIGHT, POS_ACCENT, font_size=10,
     )
-    _add_footnote(
+    _add_footnote(slide, "Reporte de Contratos Vigentes: CCMC mayo 2026 · MLCC mayo 2026. Corte de vigencia: 30 jun 2026.")
+
+
+def _no_migra_rows(summary: OperationSummary) -> int:
+    return _get_segment(summary, "Contrato").c2_no_migra_rows + _get_segment(summary, "Servicio").c2_no_migra_rows
+
+
+def _add_contratos_overview_slide(
+    prs: Presentation,
+    mlcc_summary: OperationSummary,
+    ccmc_summary: OperationSummary,
+    mlcc_val: MigracionValores,
+    ccmc_val: MigracionValores,
+) -> None:
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
         slide,
-        "Fuentes: resúmenes de segmentación y reportes CONTRATOS VIGENTES (CCMC mayo 26 | MLCC abril 26).",
+        prs.slide_width,
+        "Contratos y Órdenes de Servicio — Visión general",
+        "Cuánto migra y cuánto vale (USD), combinando MLCC y CCMC. Corte de vigencia: 30 jun 2026.",
+        section=SECTION_CONTRATOS,
     )
 
+    migra_rows = mlcc_val.total_c2_rows + ccmc_val.total_c2_rows
+    migra_usd = mlcc_val.total_c2_usd + ccmc_val.total_c2_usd
+    venc_rows = mlcc_val.total_vencidos_rows + ccmc_val.total_vencidos_rows
+    venc_usd = mlcc_val.total_vencidos_usd + ccmc_val.total_vencidos_usd
+    no_migra = _no_migra_rows(mlcc_summary) + _no_migra_rows(ccmc_summary)
 
-def _add_operation_results_slide(prs: Presentation, summary: OperationSummary, operation: str, accent: RGBColor, fill: RGBColor) -> None:
+    _add_metric_panel(
+        slide, 0.78, 1.95, 5.85, 1.5, "USD que migra a SAP", _fmt_usd(migra_usd),
+        f"{_format_int(migra_rows)} posiciones con contrato vigente", GREEN_LIGHT, GREEN, value_pt=40,
+    )
+    _add_metric_panel(
+        slide, 6.85, 1.95, 5.4, 1.5, "USD vencidos con saldo", _fmt_usd(venc_usd),
+        f"{_format_int(venc_rows)} posiciones · migran como seguimiento", POS_ACCENT_LIGHT, POS_ACCENT, value_pt=36,
+    )
+
+    rows = [
+        ["Operación", "Migran", "Migran USD", "Venc. c/saldo", "Venc. USD", "No migran"],
+        [
+            "MLCC",
+            _format_int(mlcc_val.total_c2_rows), _fmt_usd(mlcc_val.total_c2_usd),
+            _format_int(mlcc_val.total_vencidos_rows), _fmt_usd(mlcc_val.total_vencidos_usd),
+            _format_int(_no_migra_rows(mlcc_summary)),
+        ],
+        [
+            "CCMC",
+            _format_int(ccmc_val.total_c2_rows), _fmt_usd(ccmc_val.total_c2_usd),
+            _format_int(ccmc_val.total_vencidos_rows), _fmt_usd(ccmc_val.total_vencidos_usd),
+            _format_int(_no_migra_rows(ccmc_summary)),
+        ],
+        [
+            "TOTAL",
+            _format_int(migra_rows), _fmt_usd(migra_usd),
+            _format_int(venc_rows), _fmt_usd(venc_usd),
+            _format_int(no_migra),
+        ],
+    ]
+    _add_table(slide, rows, 0.78, 3.75, 11.44, 1.85, [1.6, 1.6, 2.1, 1.9, 2.1, 2.14])
+
+    lines = [
+        "Migran = posiciones con contrato vigente. Vencidos con saldo = sin vigencia pero con saldo pendiente (> 0); igual migran.",
+        "Valores en USD = valor pendiente convertido a dólares al tipo de cambio del día.",
+    ]
+    if ccmc_val.ost_rows:
+        lines.append(
+            f"Adicional CCMC — OST vigentes sin contrato marco: {_format_int(ccmc_val.ost_rows)} posiciones · {_fmt_usd(ccmc_val.ost_usd)} (se anexan al entregable)."
+        )
+    _add_callout_box(slide, 0.78, 5.75, 11.44, 1.1, "Cómo leer estas cifras", lines, GRAY_LIGHT, CHARCOAL, font_size=10)
+    _add_footnote(slide, "Fuente: resúmenes de segmentación y valores_migracion_<op>.json (USD).")
+
+
+def _add_operation_results_slide(
+    prs: Presentation,
+    summary: OperationSummary,
+    operation: str,
+    accent: RGBColor,
+    fill: RGBColor,
+    valores: MigracionValores,
+) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
     contracts = _get_segment(summary, "Contrato")
     services = _get_segment(summary, "Servicio")
-    mes = "mayo 2026" if operation.upper() == "CCMC" else "abril 2026"
+    nombre = "CCMC (Candelaria)" if operation.upper() == "CCMC" else "MLCC (Caserones)"
 
     _add_header(
         slide,
         prs.slide_width,
-        f"{operation} — Contratos y Órdenes de Servicio",
-        f"Posiciones de servicio y su vigencia (cruce con contratos vigentes {mes}; corte 30 jun 2026).",
+        f"{nombre} — Contratos y Órdenes de Servicio",
+        "Posiciones, vigencia y valor (USD) de lo que migra. Corte: 30 jun 2026.",
+        section=SECTION_CONTRATOS,
     )
 
     columns = [
-        (0.78, "Contratos", contracts),
-        (6.85, "Órdenes de Servicio", services),
+        (0.78, "Contratos", contracts, valores.contratos),
+        (6.85, "Órdenes de Servicio", services, valores.ordenes_servicio),
     ]
-    for left, title, segment in columns:
+    for left, title, segment, seg_val in columns:
         _segment_title(slide, left, 1.92, 5.62, title, accent)
         _add_metric_panel(
-            slide, left, 2.34, 5.62, 1.4,
+            slide, left, 2.34, 5.62, 1.35,
             "Posiciones (C1)", _format_int(segment.c1_rows),
-            f"{_format_int(segment.c1_documents)} documentos únicos", fill, accent, value_pt=36,
+            f"{_format_int(segment.c1_documents)} documentos únicos", fill, accent, value_pt=34,
         )
         _add_metric_panel(
-            slide, left, 3.82, 5.62, 1.4,
-            "Migran a SAP (C2)", _format_int(segment.c2_rows),
-            "Con contrato vigente", GREEN_LIGHT, GREEN, value_pt=32,
+            slide, left, 3.79, 5.62, 1.35,
+            "Migran a SAP", _format_int(segment.c2_rows),
+            f"Contrato vigente  ·  {_fmt_usd(seg_val.c2_usd)}", GREEN_LIGHT, GREEN, value_pt=30,
         )
         _add_metric_panel(
-            slide, left, 5.3, 5.62, 1.4,
-            "No migran", _format_int(segment.c2_no_migra_rows),
-            f"{_format_pct(segment.excluded_pct)} del segmento", RED_LIGHT, RED, value_pt=32,
+            slide, left, 5.24, 5.62, 1.35,
+            "Vencidos con saldo", _format_int(seg_val.vencidos_rows),
+            f"Migran como seguimiento  ·  {_fmt_usd(seg_val.vencidos_usd)}", POS_ACCENT_LIGHT, POS_ACCENT, value_pt=30,
         )
 
+    nota = (
+        "Valores en USD = valor pendiente convertido a dólares. "
+        "Las posiciones que caen en ambos segmentos se cuentan en cada uno."
+    )
+    if valores.ost_rows and operation.upper() == "CCMC":
+        nota += f"  ·  OST vigentes sin contrato marco: {_format_int(valores.ost_rows)} ({_fmt_usd(valores.ost_usd)})."
+    _add_footnote(slide, nota)
+
+
+def _add_fuentes_contratos_slide(prs: Presentation) -> None:
+    """Tabla de bases de datos usadas en Contratos y Órdenes de Servicio."""
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        "Bases de datos — Contratos y Órdenes de Servicio",
+        "Qué archivo alimenta cada categoría, contra qué se cruza la vigencia y la fecha de la base.",
+        section=SECTION_CONTRATOS,
+    )
+
+    rows = [
+        ["Categoría", "Oper.", "Base de datos (carpeta · archivos)", "Cruce de vigencia", "Fecha base"],
+        ["Contratos", "MLCC", "ordenes-compra · ME2N_SERVICIOS (7 arch.)",
+         "Reporte Contratos Vigentes Mayo-26 · hoja VIGENTES (Sitio CAS)", "jun-26"],
+        ["Contratos", "CCMC", "ordenes-compra · ME2N (4 arch.)",
+         "CONTRATOS VIGENTES CCMC Mayo-26 · Report Cttos Vigentes + Report Pedidos", "jun-26"],
+        ["Órdenes de Servicio", "MLCC", "suministros-ordenes-compra (4 arch.)",
+         "Sin cruce · vigencia por fecha de entrega", "may-26"],
+        ["Órdenes de Servicio", "CCMC", "ordenes-compra · ME2N (4 arch.)",
+         "CONTRATOS VIGENTES CCMC Mayo-26 · Report Pedidos", "jun-26"],
+    ]
+    _add_table(slide, rows, 0.78, 2.05, 11.44, 2.55, [1.7, 0.85, 3.2, 4.55, 1.14])
+
+    _add_callout_box(
+        slide, 0.78, 4.95, 11.44, 1.25,
+        "Hoja extra del cliente (Órdenes de Servicio MLCC)",
+        [
+            "Se anexa la hoja «Sitio Caserones_BD mar26» (catálogo del cliente, mar-26) al entregable de OS MLCC.",
+            "Aporta las OS vigentes por «Fin período validez» que el flujo no marca vigentes al medir por fecha de entrega.",
+        ],
+        GRAY_LIGHT, CHARCOAL, font_size=11,
+    )
     _add_footnote(
         slide,
-        f"Fuente: resumen de segmentación {operation}. Las posiciones que caen en ambos segmentos (clase ZADI) se cuentan en cada uno.",
+        "Vigencia D = cruce con CONTRATOS VIGENTES (clave: contrato marco; si no, documento de compra). "
+        "OS MLCC = fecha de entrega de la base de suministros. Corte de migración: 30 jun 2026.",
+    )
+
+
+def _add_fuentes_suministros_slide(prs: Presentation) -> None:
+    """Tabla de bases de datos usadas en Suministros."""
+    slide = prs.slides.add_slide(_find_blank_layout(prs))
+    _add_header(
+        slide,
+        prs.slide_width,
+        "Bases de datos — Suministros",
+        "Fuente única por operación; la vigencia se mide en la propia base, sin cruce con contratos.",
+        section=SECTION_SUMINISTROS,
+    )
+
+    rows = [
+        ["Operación", "Base de datos (carpeta · archivos)", "Período de datos", "Criterio de vigencia", "Cruce"],
+        ["MLCC", "suministros-ordenes-compra (4 arch.)", "2010 – 13 may 2026", "Fecha de entrega → Fin validez", "Sin cruce"],
+        ["CCMC", "suministros-ordenes-compra (3 arch.)", "2007 – 20 may 2026", "Fecha de entrega → Fin validez", "Sin cruce"],
+    ]
+    _add_table(slide, rows, 0.78, 2.15, 11.44, 1.55, [1.3, 3.55, 2.35, 3.0, 1.24])
+
+    _add_callout_box(
+        slide, 0.78, 4.05, 11.44, 1.7,
+        "Cómo se usa esta base",
+        [
+            "Es la misma fuente para las cinco aperturas: Stock, Consignación, Reparación, Traslado y Cargo Directo.",
+            "Vigencia por fecha de entrega (fallback: fin de validez); con saldo pendiente migra, sin saldo no migra.",
+            "No se cruza contra los reportes de contratos vigentes: el estado de vigencia vive en la propia base.",
+        ],
+        GRAY_LIGHT, CHARCOAL, font_size=11,
+    )
+    _add_footnote(
+        slide,
+        "Las posiciones tipo D (Contratos y Órdenes de Servicio) se procesan aparte y no entran en Suministros. "
+        "Corte de migración: 30 jun 2026.",
     )
 
 
@@ -1321,30 +1825,22 @@ def _add_suministros_slide(
     total_vigente_usd = mlcc_data.vigente_usd + ccmc_data.vigente_usd
     total_vcs_usd = mlcc_data.vcs_usd + ccmc_data.vcs_usd
 
-    def _fmt_usd(value: float) -> str:
-        if value <= 0.0:
-            return "—"
-        if value >= 1_000_000:
-            return f"USD {value / 1_000_000:.1f}M"
-        if value >= 1_000:
-            return f"USD {value / 1_000:.0f}K"
-        return f"USD {value:.0f}"
-
     _add_header(
         slide,
         prs.slide_width,
-        "Suministros — Visión general (universo no-D)",
-        "Posiciones distintas de servicio (Reparación, Consignación, Traslado, Stock, Cargo Directo) — vigencia por fecha y saldo (corte 30 Jun 2026)",
+        "Suministros — Visión general",
+        "Stock, Consignación, Reparación y Traslado, segmentados por vigencia y saldo. Corte: 30 jun 2026.",
+        section=SECTION_SUMINISTROS,
     )
 
     # KPI cards
-    _add_card(slide, 0.78, 2.0, 3.72, 1.3, "VIGENTE", _format_int(total_vigente), f"Deben migrar  ·  {_fmt_usd(total_vigente_usd)}", GREEN_LIGHT, GREEN)
-    _add_card(slide, 4.72, 2.0, 3.72, 1.3, "NO VIGENTE c/ saldo", _format_int(total_vcs), f"No vigentes con balance  ·  {_fmt_usd(total_vcs_usd)}", ORANGE_LIGHT, ORANGE)
-    _add_card(slide, 8.66, 2.0, 3.89, 1.3, "NO VIGENTE s/ saldo", _format_int(total_vss), "No vigentes sin balance — NO migran", RED_LIGHT, RED)
+    _add_card(slide, 0.78, 2.0, 3.72, 1.3, "Vigentes", _format_int(total_vigente), f"Migran  ·  {_fmt_usd(total_vigente_usd)}", GREEN_LIGHT, GREEN)
+    _add_card(slide, 4.72, 2.0, 3.72, 1.3, "Vencidos con saldo", _format_int(total_vcs), f"Migran por saldo  ·  {_fmt_usd(total_vcs_usd)}", POS_ACCENT_LIGHT, POS_ACCENT)
+    _add_card(slide, 8.66, 2.0, 3.89, 1.3, "Vencidos sin saldo", _format_int(total_vss), "No migran", RED_LIGHT, RED)
 
     # Table: per operation
     rows = [
-        ["Operación", "VIGENTE", "VIGENTE USD", "NVCS filas", "NVCS USD", "NVSS filas"],
+        ["Operación", "Vigentes", "Vig. USD", "Venc. c/saldo", "USD c/saldo", "Venc. s/saldo"],
         [
             "MLCC",
             _format_int(mlcc_data.vigente_rows),
@@ -1370,40 +1866,17 @@ def _add_suministros_slide(
             _format_int(total_vss),
         ],
     ]
-    _add_table(slide, rows, 0.78, 3.55, 11.44, 1.85, [1.25, 1.65, 2.0, 1.55, 2.0, 1.55])
+    _add_table(slide, rows, 0.78, 3.55, 11.44, 1.85, [1.45, 1.55, 1.95, 1.9, 1.95, 1.84])
 
-    # Callout: document prefix breakdown
-    all_prefix_labels = ["46XXXX (Marco)", "45XXXX", "44XXXX", "49XXXX", "Otros"]
-
-    def _pfx(data: SuministrosData, lbl: str) -> str:
-        return _format_int(data.prefix_counts.get(lbl, 0))
-
+    migra_rows = total_vigente + total_vcs
+    migra_usd = total_vigente_usd + total_vcs_usd
     lines = [
-        "46XXXX (Marco) — MLCC: {m46}  |  CCMC: {c46}".format(
-            m46=_pfx(mlcc_data, "46XXXX (Marco)"), c46=_pfx(ccmc_data, "46XXXX (Marco)")
-        ),
-        (
-            "45XXXX — MLCC: {m45} | CCMC: {c45}   ·   "
-            "44XXXX — MLCC: {m44} | CCMC: {c44}   ·   "
-            "49XXXX — MLCC: {m49} | CCMC: {c49}   ·   "
-            "Otros — MLCC: {mot} | CCMC: {cot}"
-        ).format(
-            m45=_pfx(mlcc_data, "45XXXX"), c45=_pfx(ccmc_data, "45XXXX"),
-            m44=_pfx(mlcc_data, "44XXXX"), c44=_pfx(ccmc_data, "44XXXX"),
-            m49=_pfx(mlcc_data, "49XXXX"), c49=_pfx(ccmc_data, "49XXXX"),
-            mot=_pfx(mlcc_data, "Otros"),  cot=_pfx(ccmc_data, "Otros"),
-        ),
-        (
-            "Con material — MLCC: {mc} | CCMC: {cc}   ·   "
-            "Sin material — MLCC: {ms} | CCMC: {cs}"
-        ).format(
-            mc=_format_int(mlcc_data.con_material), cc=_format_int(ccmc_data.con_material),
-            ms=_format_int(mlcc_data.sin_material), cs=_format_int(ccmc_data.sin_material),
-        ),
+        f"Migran {_format_int(migra_rows)} posiciones (vigentes + vencidas con saldo) por un total de {_fmt_usd(migra_usd)}.",
+        f"No migran {_format_int(total_vss)} posiciones vencidas sin saldo pendiente — el grueso del volumen, pero sin valor a migrar.",
     ]
-    _add_callout_box(slide, 0.78, 5.55, 11.44, 1.2, "Apertura por código de documento de compra", lines, GRAY_LIGHT, CHARCOAL, font_size=9)
+    _add_callout_box(slide, 0.78, 5.55, 11.44, 1.15, "Cuánto migra y cuánto vale", lines, GRAY_LIGHT, CHARCOAL, font_size=11)
 
-    _add_footnote(slide, "Fuente: reportes de Suministros más recientes en outputs/reportes/ (suministros-ordenes-compra). Corte vigencia: 30 Jun 2026.")
+    _add_footnote(slide, "Fuente: reportes de Suministros en outputs/reportes/. Valores USD = valor pendiente convertido a dólares. Corte: 30 jun 2026.")
 
 
 def _add_suministros_segment_slide(
@@ -1411,78 +1884,78 @@ def _add_suministros_segment_slide(
     mlcc_segs: list[SupplySegmentRow],
     ccmc_segs: list[SupplySegmentRow],
 ) -> None:
-    """Apertura de Suministros por sub-bloque (Reparación, Consignación, ...)."""
+    """Apertura de Suministros por sub-bloque (Stock, Consignación, Reparación, ...)."""
     slide = prs.slides.add_slide(_find_blank_layout(prs))
     _add_header(
         slide,
         prs.slide_width,
         "Suministros — Apertura por sub-bloque",
-        "Rotulación por tipo de posición y contrato marco, ortogonal a la vigencia (MLCC + CCMC combinados)",
+        "Stock, Consignación, Reparación y Traslado (MLCC + CCMC), con valor a migrar en USD. Corte: 30 jun 2026.",
+        section=SECTION_SUMINISTROS,
     )
 
-    order = ["Reparación", "Consignación", "Traslado/Transporte", "Stock", "Cargo Directo", "Otros"]
+    order = ["Stock", "Cargo Directo", "Consignación", "Reparación", "Traslado/Transporte", "Otros"]
     combined: dict[str, SupplySegmentRow] = {}
     for seg_row in [*mlcc_segs, *ccmc_segs]:
         entry = combined.setdefault(seg_row.segment, SupplySegmentRow(segment=seg_row.segment))
         entry.vigente_rows += seg_row.vigente_rows
         entry.vcs_rows += seg_row.vcs_rows
         entry.vss_rows += seg_row.vss_rows
+        entry.vigente_usd += seg_row.vigente_usd
+        entry.vcs_usd += seg_row.vcs_usd
 
     present = [seg for seg in order if seg in combined]
     present += [seg for seg in combined if seg not in order]
 
-    rows = [["Sub-bloque", "VIGENTE", "NVCS (migra)", "NVSS (no migra)", "Total"]]
+    rows = [["Sub-bloque", "Vigentes", "Vig. USD", "Venc. c/saldo", "USD c/saldo", "Venc. s/saldo"]]
     tot = SupplySegmentRow(segment="TOTAL")
     for seg in present:
         e = combined[seg]
         tot.vigente_rows += e.vigente_rows
         tot.vcs_rows += e.vcs_rows
         tot.vss_rows += e.vss_rows
+        tot.vigente_usd += e.vigente_usd
+        tot.vcs_usd += e.vcs_usd
         rows.append([
             seg,
             _format_int(e.vigente_rows),
+            _fmt_usd(e.vigente_usd),
             _format_int(e.vcs_rows),
+            _fmt_usd(e.vcs_usd),
             _format_int(e.vss_rows),
-            _format_int(e.total_rows),
         ])
     rows.append([
         "TOTAL",
         _format_int(tot.vigente_rows),
+        _fmt_usd(tot.vigente_usd),
         _format_int(tot.vcs_rows),
+        _fmt_usd(tot.vcs_usd),
         _format_int(tot.vss_rows),
-        _format_int(tot.total_rows),
     ])
 
     n_rows = len(rows)
-    tbl_height = min(4.6, max(1.4, n_rows * 0.5))
-    _add_table(slide, rows, 0.78, 2.1, 11.44, tbl_height, [3.2, 2.06, 2.06, 2.12, 2.0])
+    tbl_height = min(4.2, max(1.4, n_rows * 0.46))
+    _add_table(slide, rows, 0.78, 2.1, 11.44, tbl_height, [2.7, 1.5, 1.95, 1.84, 1.95, 1.5])
 
     _add_callout_box(
-        slide, 0.78, 6.5, 11.44, 0.5,
-        "Criterio de sub-bloque",
-        ["Reparación = subcontratación (L) · Consignación = C/K · Traslado = V/U · Stock = vacío con marco · Cargo Directo = vacío sin marco"],
+        slide, 0.78, 6.35, 11.44, 0.6,
+        "Migran las posiciones vigentes y las vencidas con saldo (columnas en USD); las vencidas sin saldo no migran.",
+        ["Reparación = subcontratación (L) · Consignación = C/K · Traslado = V/U · Stock = sin tipo con marco · Cargo Directo = sin tipo sin marco."],
         GRAY_LIGHT, CHARCOAL, font_size=9,
     )
-    _add_footnote(slide, "Fuente: hoja Por_Subsegmento de los reportes de Suministros en outputs/reportes/. Corte vigencia: 30 Jun 2026.")
+    _add_footnote(slide, "Fuente: hoja Por_Subsegmento de los reportes de Suministros en outputs/reportes/. Corte: 30 jun 2026.")
 
 
 def _add_suministros_plant_slide(prs: Presentation, operation: str, plant_rows: list[PlantRow]) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
+    nombre = "MLCC (Caserones)" if operation.upper() == "MLCC" else "CCMC (Candelaria)"
     _add_header(
         slide,
         prs.slide_width,
-        f"{operation} | Suministros — Apertura por planta",
-        "Posiciones no-D, segmentadas por vigencia y saldo pendiente (corte: 30 Jun 2026)",
+        f"{nombre} — Suministros por planta",
+        "Posiciones de suministros, por vigencia, saldo y valor (USD). Corte: 30 jun 2026.",
+        section=SECTION_SUMINISTROS,
     )
-
-    def _fmt_usd(value: float) -> str:
-        if value <= 0.0:
-            return "—"
-        if value >= 1_000_000:
-            return f"USD {value / 1_000_000:.1f}M"
-        if value >= 1_000:
-            return f"USD {value / 1_000:.0f}K"
-        return f"USD {value:.0f}"
 
     total_row = next((r for r in plant_rows if r.planta == "TOTAL"), None)
 
@@ -1516,7 +1989,7 @@ def _add_suministros_plant_slide(prs: Presentation, operation: str, plant_rows: 
     for idx, cw in enumerate(col_widths):
         table.columns[idx].width = Inches(cw)
 
-    for c_idx, hdr_text in enumerate(["Planta", "VIGENTE", "VIGENTE USD", "NVCS filas", "NVCS USD", "NVSS filas"]):
+    for c_idx, hdr_text in enumerate(["Planta", "Vigentes", "Vig. USD", "Venc. c/saldo", "USD c/saldo", "Venc. s/saldo"]):
         cell = table.cell(0, c_idx)
         cell.text = hdr_text
         cell.vertical_anchor = MSO_ANCHOR.MIDDLE
@@ -1562,6 +2035,32 @@ def _add_suministros_plant_slide(prs: Presentation, operation: str, plant_rows: 
     _add_footnote(slide, "Fuente: reporte de Suministros más reciente en outputs/reportes/. Corte vigencia: 30 Jun 2026.")
 
 
+def _slide_text_blob(slide) -> str:
+    parts = []
+    for shape in slide.shapes:
+        if getattr(shape, "has_text_frame", False) and shape.text_frame.text.strip():
+            parts.append(shape.text_frame.text)
+    return " \n ".join(parts).lower()
+
+
+def _find_slide_index(prs: Presentation, *needles: str) -> int | None:
+    for index, slide in enumerate(prs.slides):
+        blob = _slide_text_blob(slide)
+        if any(needle.lower() in blob for needle in needles):
+            return index
+    return None
+
+
+def _reorder_slides_by_index(prs: Presentation, desired_indices: list[int]) -> None:
+    """Reordena las láminas según índices del orden documental actual."""
+    sld_lst = prs.slides._sldIdLst
+    elements = list(sld_lst)
+    for element in elements:
+        sld_lst.remove(element)
+    for idx in desired_indices:
+        sld_lst.append(elements[idx])
+
+
 def generate_project_presentation(
     template_path: Path,
     output_path: Path,
@@ -1579,8 +2078,8 @@ def generate_project_presentation(
     prs = Presentation(str(template_path))
     mlcc_summary = parse_summary_markdown(mlcc_summary_path)
     ccmc_summary = parse_summary_markdown(ccmc_summary_path)
-    mlcc_stats = _load_po_stats(mlcc_stats_path, "MLCC")
-    ccmc_stats = _load_po_stats(ccmc_stats_path, "CCMC")
+    mlcc_stats = _load_universo_oc(output_root, "MLCC") or _load_po_stats(mlcc_stats_path, "MLCC")
+    ccmc_stats = _load_universo_oc(output_root, "CCMC") or _load_po_stats(ccmc_stats_path, "CCMC")
     mlcc_tmp = _load_temp_snapshot(tmp_stats_path, "MLCC")
     ccmc_tmp = _load_temp_snapshot(tmp_stats_path, "CCMC")
     mlcc_comp = _load_suministros_data(output_root, "MLCC")
@@ -1589,22 +2088,73 @@ def generate_project_presentation(
     ccmc_plants = _load_suministros_plants(output_root, "CCMC")
     mlcc_segs = _load_suministros_segments(output_root, "MLCC")
     ccmc_segs = _load_suministros_segments(output_root, "CCMC")
+    mlcc_val = _load_valores_migracion(output_root, "MLCC")
+    ccmc_val = _load_valores_migracion(output_root, "CCMC")
+    criteria_lines = _characterization_lines(_load_characterization_criteria(project_root))
 
-    for index in range(len(prs.slides) - 1, 0, -1):
-        _delete_slide(prs, index)
+    # Láminas hechas a mano que se conservan de la plantilla base (no se re-codean):
+    # portada (índice 0), diagrama de flujo (Método) y PIR (última sección, con gráfico).
+    flow_idx = _find_slide_index(prs, "flujo de clasificación", "migra / no migra")
+    pir_idx = _find_slide_index(prs, "registro de información de compras", "(pir)")
+    keep = {0}
+    if flow_idx is not None:
+        keep.add(flow_idx)
+    if pir_idx is not None:
+        keep.add(pir_idx)
+    for index in range(len(prs.slides) - 1, -1, -1):
+        if index not in keep:
+            _delete_slide(prs, index)
 
-    _update_cover_slide(prs.slides[0], generated_on)
-    _add_findings_slide(prs, mlcc_summary, ccmc_summary, mlcc_stats, ccmc_stats, mlcc_tmp)
-    _add_universe_slide(prs, mlcc_stats, ccmc_stats)
-    _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT)
-    _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT)
-    _add_flow_slide(prs, mlcc_summary, ccmc_summary)
-    _add_operation_results_slide(prs, ccmc_summary, "CCMC", GREEN, GREEN_LIGHT)
-    _add_operation_results_slide(prs, mlcc_summary, "MLCC", BLUE, BLUE_LIGHT)
-    _add_suministros_slide(prs, mlcc_comp, ccmc_comp)
-    _add_suministros_segment_slide(prs, mlcc_segs, ccmc_segs)
-    _add_suministros_plant_slide(prs, "MLCC", mlcc_plants)
-    _add_suministros_plant_slide(prs, "CCMC", ccmc_plants)
+    # Tras la poda, los supervivientes mantienen el orden: portada, [flujo], [pir].
+    cover_pos = 0
+    pos = 1
+    flow_pos = None
+    if flow_idx is not None:
+        flow_pos = pos
+        pos += 1
+    pir_pos = None
+    if pir_idx is not None:
+        pir_pos = pos
+        pos += 1
+    built_start = pos
+
+    _update_cover_slide(prs.slides[cover_pos], generated_on)
+
+    # Láminas nuevas (se anexan al final en este orden).
+    _add_index_slide(prs)                                                                       # b0
+    _add_intro_alcance_slide(prs)                                                               # b1
+    _add_entregables_slide(prs)                                                                 # b2
+    _add_universe_slide(prs, mlcc_stats, ccmc_stats, mlcc_val, ccmc_val, mlcc_comp, ccmc_comp)  # b3
+    _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT)                  # b4
+    _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT)               # b5
+    _add_criterios_slide(prs, criteria_lines)                                                   # b6
+    _add_suministros_slide(prs, mlcc_comp, ccmc_comp)                                           # b7
+    _add_suministros_segment_slide(prs, mlcc_segs, ccmc_segs)                                   # b8
+    _add_suministros_plant_slide(prs, "MLCC", mlcc_plants)                                      # b9
+    _add_suministros_plant_slide(prs, "CCMC", ccmc_plants)                                     # b10
+    _add_contratos_overview_slide(prs, mlcc_summary, ccmc_summary, mlcc_val, ccmc_val)          # b11
+    _add_operation_results_slide(prs, ccmc_summary, "CCMC", GREEN, GREEN_LIGHT, ccmc_val)      # b12
+    _add_operation_results_slide(prs, mlcc_summary, "MLCC", BLUE, BLUE_LIGHT, mlcc_val)        # b13
+    _add_resumen_ejecutivo_slide(prs, mlcc_val, ccmc_val, mlcc_comp, ccmc_comp)                 # b14
+    _add_fuentes_contratos_slide(prs)                                                           # b15
+    _add_fuentes_suministros_slide(prs)                                                         # b16
+    b = list(range(built_start, built_start + 17))  # índices de las 17 nuevas
+
+    # Orden final por secciones (Contratos y Órdenes de Servicio al final).
+    desired = [cover_pos, b[0], b[1], b[2], b[14], b[3], b[4], b[5]]  # portada · índice · alcance · entregables · resumen ejecutivo · universo · MLCC · CCMC
+    if flow_pos is not None:
+        desired.append(flow_pos)                         # Método: flujo (conservado)
+    desired.append(b[6])                                 # Método: criterios
+    desired += [b[16], b[7], b[8], b[9], b[10]]          # Suministros: bases de datos · general · sub-bloque · MLCC · CCMC
+    desired += [b[15], b[11], b[12], b[13]]              # Contratos/OS: bases de datos · general · CCMC · MLCC
+    if pir_pos is not None:
+        desired.append(pir_pos)                          # PIR (conservada)
+    _reorder_slides_by_index(prs, desired)
+
+    # Renumera los partnames de las láminas (slide1..slideN) en el orden final.
+    # Necesario porque borrar y luego agregar láminas puede colisionar nombres
+    # (p.ej. slide6/slide13 de las conservadas); esto los deja únicos y limpios.
+    prs.part.rename_slide_parts([sldId.rId for sldId in prs.slides._sldIdLst])
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(output_path))

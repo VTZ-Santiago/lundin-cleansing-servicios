@@ -14,8 +14,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--template",
         type=Path,
-        default=project_root / "resources" / "Presentacion_Lundin_300426_v1.pptx",
-        help="Ruta a la presentación de referencia usada como base visual.",
+        default=project_root / "resources" / "base_presentacion_servicios.pptx",
+        help="Plantilla base (portada, diagrama de flujo y lámina PIR se conservan de aquí).",
     )
     parser.add_argument(
         "--mlcc-summary",
