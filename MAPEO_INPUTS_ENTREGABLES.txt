@@ -32,9 +32,20 @@ Inputs usados:
 - inputs/CCMC/suministros-ordenes-compra/*.xlsx
 - inputs/MLCC/suministros-ordenes-compra/*.xlsx
 
-Entregables / reportes que alimentan presentacion:
+Entregables generados:
+- outputs/entregables/OC_migra_suministros_CCMC.xlsx
+- outputs/entregables/OC_vencidos_saldo_suministros_CCMC.xlsx
+- outputs/entregables/OC_migra_suministros_MLCC.xlsx
+- outputs/entregables/OC_vencidos_saldo_suministros_MLCC.xlsx
+
+Controles / reportes generados:
 - outputs/reportes/suministros_ccmc_*.xlsx
 - outputs/reportes/suministros_mlcc_*.xlsx
+
+Notas de control:
+- MIGRA = categoria VIGENTE
+- VENCIDOS_SALDO = categoria NO_VIGENTE_CON_SALDO
+- NO_VIGENTE_SIN_SALDO se mantiene en reportes de control y no migra
 
 4) PRESENTACION EJECUTIVA
 Inputs usados (directos):

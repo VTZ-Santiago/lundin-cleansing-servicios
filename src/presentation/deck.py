@@ -1245,14 +1245,16 @@ def _add_entregables_slide(prs: Presentation) -> None:
         ["Contratos / OS", "OC_migra_ordenes_servicio_{OP}.xlsx", "Órdenes de servicio vigentes a migrar.", "outputs/entregables/"],
         ["Contratos / OS", "OC_vencidos_saldo_contratos_{OP}.xlsx", "Contratos vencidos con saldo para seguimiento.", "outputs/entregables/"],
         ["Contratos / OS", "OC_vencidos_saldo_ordenes_servicio_{OP}.xlsx", "OS vencidas con saldo para seguimiento.", "outputs/entregables/"],
-        ["Suministros", "suministros_{op}_*.xlsx", "Clasificación vigente / vencido con saldo / vencido sin saldo.", "outputs/reportes/"],
+        ["Suministros", "OC_migra_suministros_{OP}.xlsx", "Posiciones vigentes de Suministros que migran a SAP.", "outputs/entregables/"],
+        ["Suministros", "OC_vencidos_saldo_suministros_{OP}.xlsx", "Suministros vencidos con saldo para seguimiento.", "outputs/entregables/"],
+        ["Suministros", "suministros_{op}_*.xlsx", "Reporte de control: resumen, aperturas y detalle por categoría.", "outputs/reportes/"],
         ["Suministros", "resumen_segmentacion_{OP}.md", "Resumen ejecutivo por operación para trazabilidad.", "outputs/control_points/"],
         ["Presentación", "presentacion_servicios_YYYYMMDD_v1.pptx", "Síntesis ejecutiva consolidada del servicio.", "outputs/entregables/"],
     ]
-    _add_table(slide, rows, 0.78, 2.05, 11.44, 2.95, [1.8, 3.0, 4.05, 2.59])
+    _add_table(slide, rows, 0.78, 2.05, 11.44, 3.2, [1.8, 3.0, 4.05, 2.59])
 
     _add_callout_box(
-        slide, 0.78, 5.25, 11.44, 1.2,
+        slide, 0.78, 5.45, 11.44, 1.0,
         "Notas de entrega",
         [
             "{OP} representa MLCC y CCMC. Las salidas se publican por operación para uso directo de migración.",

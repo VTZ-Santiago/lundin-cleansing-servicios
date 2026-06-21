@@ -96,6 +96,9 @@ def _first_match(directory: Path, pattern: str) -> Path:
 
 
 def _characterization_path() -> Path:
+    inputs_match = sorted((ROOT / "inputs").glob("Car*.xlsx"))
+    if inputs_match:
+        return inputs_match[0]
     return _first_match(ROOT / "tmp", "Car*.xlsx")
 
 
@@ -565,6 +568,35 @@ def _run_suministros_branch(operation: str, output_dir: Path, use_cache: bool) -
     )
     if report_path:
         print(f"Reporte Suministros: {report_path.relative_to(ROOT).as_posix()}", flush=True)
+
+    # Entregables de Suministros (misma lógica operativa de D):
+    # - MIGRA: VIGENTE
+    # - VENCIDOS_SALDO: NO_VIGENTE_CON_SALDO
+    entregables_dir = output_dir.parent / "entregables"
+    export_cols = [col for col in CONTROL_POINT_COLUMNS if col in non_d.columns]
+    migra_cat = m01_config.get("category_active", "VIGENTE")
+    vencidos_cat = m01_config.get("category_expired_with_balance", "NO_VIGENTE_CON_SALDO")
+
+    migra_df = non_d[non_d[cat_col] == migra_cat].copy() if cat_col in non_d.columns else non_d.iloc[0:0].copy()
+    vencidos_df = (
+        non_d[non_d[cat_col] == vencidos_cat].copy() if cat_col in non_d.columns else non_d.iloc[0:0].copy()
+    )
+
+    export_deliverable(
+        migra_df[export_cols].copy(),
+        entregables_dir / f"OC_migra_suministros_{operation}.xlsx",
+        sheet_name="C2_MIGRA",
+    )
+    export_deliverable(
+        vencidos_df[export_cols].copy(),
+        entregables_dir / f"OC_vencidos_saldo_suministros_{operation}.xlsx",
+        sheet_name="VENCIDOS_SALDO_PENDIENTE",
+    )
+    print(
+        f"  Entregables {operation} Suministros: "
+        f"migra={len(migra_df):,} | vencidos_saldo={len(vencidos_df):,}",
+        flush=True,
+    )
 
 
 def run(
