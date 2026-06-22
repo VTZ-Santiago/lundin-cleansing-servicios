@@ -37,6 +37,8 @@ Entregables generados:
 - outputs/entregables/OC_vencidos_saldo_suministros_CCMC.xlsx
 - outputs/entregables/OC_migra_suministros_MLCC.xlsx
 - outputs/entregables/OC_vencidos_saldo_suministros_MLCC.xlsx
+- outputs/entregables/OC_migra_suministros_{subbloque}_{OP}.xlsx
+- outputs/entregables/OC_vencidos_saldo_suministros_{subbloque}_{OP}.xlsx
 
 Controles / reportes generados:
 - outputs/reportes/suministros_ccmc_*.xlsx
@@ -46,6 +48,7 @@ Notas de control:
 - MIGRA = categoria VIGENTE
 - VENCIDOS_SALDO = categoria NO_VIGENTE_CON_SALDO
 - NO_VIGENTE_SIN_SALDO se mantiene en reportes de control y no migra
+- subbloque = reparacion | consignacion | traslado_transporte | stock | cargo_directo | otros
 
 4) PRESENTACION EJECUTIVA
 Inputs usados (directos):

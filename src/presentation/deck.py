@@ -117,8 +117,9 @@ class POStats:
     deletion_flags: dict[str, int] = field(default_factory=dict)
     top_frameworks: list[tuple[str, int, int]] = field(default_factory=list)
 
-    def top_doc_classes(self, limit: int = 5) -> list[tuple[str, int]]:
-        return sorted(self.doc_classes.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    def top_doc_classes(self, limit: int | None = None) -> list[tuple[str, int]]:
+        items = sorted(self.doc_classes.items(), key=lambda item: (-item[1], item[0]))
+        return items if limit is None else items[:limit]
 
     def top_position_types(self, limit: int = 4) -> list[tuple[str, int]]:
         return sorted(self.position_types.items(), key=lambda item: (-item[1], item[0]))[:limit]
@@ -1061,6 +1062,7 @@ def _add_bar_box(
     items: list[tuple[str, int]],
     fill: RGBColor,
     accent: RGBColor,
+    keep_zero: bool = False,
 ) -> None:
     shape = slide.shapes.add_shape(
         MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
@@ -1084,21 +1086,28 @@ def _add_bar_box(
     run.font.bold = True
     run.font.color.rgb = accent
 
-    clean_items = [(label, value) for label, value in items if value > 0]
+    clean_items = [(label, value) for label, value in items if (value > 0 or keep_zero)]
     if not clean_items:
         return
     max_value = max(value for _, value in clean_items) or 1
     row_height = (height - 0.7) / len(clean_items)
+    label_font = 9 if len(clean_items) <= 12 else (8 if len(clean_items) <= 18 else 7)
+    value_font = 9 if len(clean_items) <= 12 else (8 if len(clean_items) <= 18 else 7)
+    # Evita sobreposición cuando hay muchas categorías (caso CCMC):
+    # todo el alto de cada fila escala con row_height.
+    label_box_height = max(min(row_height * 0.9, 0.22), 0.07)
+    value_box_height = max(min(row_height * 0.9, 0.24), 0.07)
+    bar_height = max(min(row_height * 0.55, 0.14), 0.04)
 
     for index, (label, value) in enumerate(clean_items):
         current_top = top + 0.52 + index * row_height
-        label_box = slide.shapes.add_textbox(Inches(left + 0.18), Inches(current_top), Inches(2.0), Inches(0.22))
+        label_box = slide.shapes.add_textbox(Inches(left + 0.18), Inches(current_top), Inches(2.0), Inches(label_box_height))
         label_frame = label_box.text_frame
         label_frame.clear()
         paragraph = label_frame.paragraphs[0]
         run = paragraph.add_run()
         run.text = label
-        run.font.size = Pt(10)
+        run.font.size = Pt(label_font)
         run.font.bold = True
         run.font.color.rgb = CHARCOAL
 
@@ -1107,33 +1116,34 @@ def _add_bar_box(
         bg_bar = slide.shapes.add_shape(
             MSO_AUTO_SHAPE_TYPE.RECTANGLE,
             Inches(bar_left),
-            Inches(current_top + 0.04),
+            Inches(current_top + max((label_box_height - bar_height) / 2, 0.01)),
             Inches(bar_width),
-            Inches(0.14),
+            Inches(bar_height),
         )
         bg_bar.fill.solid()
         bg_bar.fill.fore_color.rgb = RGBColor(255, 255, 255)
         bg_bar.line.color.rgb = GRAY
 
-        fg_bar = slide.shapes.add_shape(
-            MSO_AUTO_SHAPE_TYPE.RECTANGLE,
-            Inches(bar_left),
-            Inches(current_top + 0.04),
-            Inches(max(bar_width * value / max_value, 0.08)),
-            Inches(0.14),
-        )
-        fg_bar.fill.solid()
-        fg_bar.fill.fore_color.rgb = accent
-        fg_bar.line.fill.background()
+        if value > 0:
+            fg_bar = slide.shapes.add_shape(
+                MSO_AUTO_SHAPE_TYPE.RECTANGLE,
+                Inches(bar_left),
+                Inches(current_top + max((label_box_height - bar_height) / 2, 0.01)),
+                Inches(max(bar_width * value / max_value, 0.02)),
+                Inches(bar_height),
+            )
+            fg_bar.fill.solid()
+            fg_bar.fill.fore_color.rgb = accent
+            fg_bar.line.fill.background()
 
-        value_box = slide.shapes.add_textbox(Inches(left + width - 1.0), Inches(current_top - 0.02), Inches(0.82), Inches(0.24))
+        value_box = slide.shapes.add_textbox(Inches(left + width - 1.0), Inches(current_top - 0.02), Inches(0.82), Inches(value_box_height))
         value_frame = value_box.text_frame
         value_frame.clear()
         paragraph = value_frame.paragraphs[0]
         paragraph.alignment = PP_ALIGN.RIGHT
         run = paragraph.add_run()
         run.text = _format_int(value)
-        run.font.size = Pt(10)
+        run.font.size = Pt(value_font)
         run.font.color.rgb = SLATE
 
 
@@ -1247,14 +1257,15 @@ def _add_entregables_slide(prs: Presentation) -> None:
         ["Contratos / OS", "OC_vencidos_saldo_ordenes_servicio_{OP}.xlsx", "OS vencidas con saldo para seguimiento.", "outputs/entregables/"],
         ["Suministros", "OC_migra_suministros_{OP}.xlsx", "Posiciones vigentes de Suministros que migran a SAP.", "outputs/entregables/"],
         ["Suministros", "OC_vencidos_saldo_suministros_{OP}.xlsx", "Suministros vencidos con saldo para seguimiento.", "outputs/entregables/"],
+        ["Suministros", "OC_*_suministros_{subbloque}_{OP}.xlsx", "Entregables separados por sub-bloque: stock, consignación, traslado, reparación, cargo directo y otros.", "outputs/entregables/"],
         ["Suministros", "suministros_{op}_*.xlsx", "Reporte de control: resumen, aperturas y detalle por categoría.", "outputs/reportes/"],
         ["Suministros", "resumen_segmentacion_{OP}.md", "Resumen ejecutivo por operación para trazabilidad.", "outputs/control_points/"],
         ["Presentación", "presentacion_servicios_YYYYMMDD_v1.pptx", "Síntesis ejecutiva consolidada del servicio.", "outputs/entregables/"],
     ]
-    _add_table(slide, rows, 0.78, 2.05, 11.44, 3.2, [1.8, 3.0, 4.05, 2.59])
+    _add_table(slide, rows, 0.78, 2.05, 11.44, 3.45, [1.8, 3.0, 4.05, 2.59])
 
     _add_callout_box(
-        slide, 0.78, 5.45, 11.44, 1.0,
+        slide, 0.78, 5.7, 11.44, 0.82,
         "Notas de entrega",
         [
             "{OP} representa MLCC y CCMC. Las salidas se publican por operación para uso directo de migración.",
@@ -1438,7 +1449,14 @@ def _operation_callout_lines(stats: POStats, snapshot: TempOCSnapshot) -> list[s
     return lines
 
 
-def _add_operation_structure_slide(prs: Presentation, stats: POStats, snapshot: TempOCSnapshot, accent: RGBColor, fill: RGBColor) -> None:
+def _add_operation_structure_slide(
+    prs: Presentation,
+    stats: POStats,
+    snapshot: TempOCSnapshot,
+    accent: RGBColor,
+    fill: RGBColor,
+    doc_class_catalog: list[str] | None = None,
+) -> None:
     slide = prs.slides.add_slide(_find_blank_layout(prs))
     nombre = "MLCC (Caserones)" if stats.operation == "MLCC" else "CCMC (Candelaria)"
     _add_header(
@@ -1466,9 +1484,13 @@ def _add_operation_structure_slide(prs: Presentation, stats: POStats, snapshot: 
         (_pos_type_label(code), n)
         for code, n in sorted(stats.position_types.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
-    _add_bar_box(slide, 0.78, 3.6, 5.65, 2.35, "Clases documentales · sobre OC totales", stats.top_doc_classes(6), fill, accent)
-    _add_bar_box(slide, 6.6, 3.6, 5.62, 2.35, "Tipos de posición · sobre OC totales", pos_items, POS_ACCENT_LIGHT, POS_ACCENT)
-    _add_callout_box(slide, 0.78, 6.12, 11.44, 0.78, "Lectura de la estructura", _operation_callout_lines(stats, snapshot), GRAY_LIGHT, CHARCOAL, font_size=10)
+    if doc_class_catalog:
+        class_items = [(code, stats.doc_classes.get(code, 0)) for code in doc_class_catalog]
+    else:
+        class_items = stats.top_doc_classes()
+    _add_bar_box(slide, 0.78, 3.6, 5.65, 3.0, "Clases documentales · sobre OC totales", class_items, fill, accent, keep_zero=True)
+    _add_bar_box(slide, 6.6, 3.6, 5.62, 3.0, "Tipos de posición · sobre OC totales", pos_items, POS_ACCENT_LIGHT, POS_ACCENT)
+    _add_callout_box(slide, 0.78, 6.8, 11.44, 0.42, "Lectura de la estructura", _operation_callout_lines(stats, snapshot), GRAY_LIGHT, CHARCOAL, font_size=9)
     _add_footnote(slide, f"Fuente: universo de OC vigente de {stats.operation}. Clases y tipos contados sobre el total de posiciones.")
 
 
@@ -2094,6 +2116,7 @@ def generate_project_presentation(
     ccmc_segs = _load_suministros_segments(output_root, "CCMC")
     mlcc_val = _load_valores_migracion(output_root, "MLCC")
     ccmc_val = _load_valores_migracion(output_root, "CCMC")
+    doc_class_catalog = sorted(set(mlcc_stats.doc_classes.keys()) | set(ccmc_stats.doc_classes.keys()))
     criteria_lines = _characterization_lines(_load_characterization_criteria(project_root))
 
     # Láminas hechas a mano que se conservan de la plantilla base (no se re-codean):
@@ -2129,8 +2152,8 @@ def generate_project_presentation(
     _add_intro_alcance_slide(prs)                                                               # b1
     _add_entregables_slide(prs)                                                                 # b2
     _add_universe_slide(prs, mlcc_stats, ccmc_stats, mlcc_val, ccmc_val, mlcc_comp, ccmc_comp)  # b3
-    _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT)                  # b4
-    _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT)               # b5
+    _add_operation_structure_slide(prs, mlcc_stats, mlcc_tmp, BLUE, BLUE_LIGHT, doc_class_catalog)  # b4
+    _add_operation_structure_slide(prs, ccmc_stats, ccmc_tmp, GREEN, GREEN_LIGHT, doc_class_catalog) # b5
     _add_criterios_slide(prs, criteria_lines)                                                   # b6
     _add_suministros_slide(prs, mlcc_comp, ccmc_comp)                                           # b7
     _add_suministros_segment_slide(prs, mlcc_segs, ccmc_segs)                                   # b8

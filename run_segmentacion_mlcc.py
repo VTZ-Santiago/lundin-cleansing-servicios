@@ -39,7 +39,7 @@ from src.segmentacion.rules.group1.e01 import before_cutoff_mask
 from src.segmentacion.po_loader import PurchaseOrderLoadResult, load_purchase_orders
 from src.segmentacion.report import build_segment_summary, write_summary_markdown
 from src.segmentacion.segments import SEGMENT_LABELS, segment_dataframe
-from src.segmentacion.supply_segments import SUPPLY_SEGMENT_COLUMN, classify_supply_segments
+from src.segmentacion.supply_segments import SUPPLY_SEGMENT_COLUMN, SUPPLY_SEGMENT_ORDER, classify_supply_segments
 from src.segmentacion.ost_vigentes import build_missing_ost_vigentes, find_registry
 from src.segmentacion.bd_vigentes_mlcc import build_os_vigentes_bd, find_bd_base
 
@@ -55,6 +55,14 @@ LEGACY_ROOT_CONTROL_POINTS = (
     "C2_NO_MIGRA_MLCC.xlsx",
     "C3_MLCC.xlsx",
 )
+SUPPLY_SEGMENT_FILE_IDS = {
+    "Reparación": "reparacion",
+    "Consignación": "consignacion",
+    "Traslado/Transporte": "traslado_transporte",
+    "Stock": "stock",
+    "Cargo Directo": "cargo_directo",
+    "Otros": "otros",
+}
 RULES_YAML = ROOT / "src" / "segmentacion" / "rules" / "rules.yaml"
 CONTROL_POINT_COLUMNS = [
     "plant_code",
@@ -597,6 +605,35 @@ def _run_suministros_branch(operation: str, output_dir: Path, use_cache: bool) -
         f"migra={len(migra_df):,} | vencidos_saldo={len(vencidos_df):,}",
         flush=True,
     )
+
+    # Entregables adicionales por sub-bloque (Stock, Consignación, etc.)
+    # para uso operativo, sin reemplazar los archivos consolidados.
+    if SUPPLY_SEGMENT_COLUMN in non_d.columns:
+        for segment_name in SUPPLY_SEGMENT_ORDER:
+            segment_id = SUPPLY_SEGMENT_FILE_IDS.get(segment_name)
+            if not segment_id:
+                continue
+
+            seg_migra = migra_df[migra_df[SUPPLY_SEGMENT_COLUMN] == segment_name].copy()
+            seg_vencidos = vencidos_df[vencidos_df[SUPPLY_SEGMENT_COLUMN] == segment_name].copy()
+            if seg_migra.empty and seg_vencidos.empty:
+                continue
+
+            export_deliverable(
+                seg_migra[export_cols].copy(),
+                entregables_dir / f"OC_migra_suministros_{segment_id}_{operation}.xlsx",
+                sheet_name="C2_MIGRA",
+            )
+            export_deliverable(
+                seg_vencidos[export_cols].copy(),
+                entregables_dir / f"OC_vencidos_saldo_suministros_{segment_id}_{operation}.xlsx",
+                sheet_name="VENCIDOS_SALDO_PENDIENTE",
+            )
+            print(
+                f"    Sub-bloque {segment_name}: "
+                f"migra={len(seg_migra):,} | vencidos_saldo={len(seg_vencidos):,}",
+                flush=True,
+            )
 
 
 def run(
